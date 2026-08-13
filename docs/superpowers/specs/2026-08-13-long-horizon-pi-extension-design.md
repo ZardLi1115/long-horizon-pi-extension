@@ -2,7 +2,7 @@
 
 日期：2026-08-13  
 目标版本：Pi 0.73.1  
-源码目录：`/Users/zard/long-horizon-pi-extension`
+源码目录：独立 `long-horizon-pi-extension` 仓库
 
 ## 1. 目标与边界
 
@@ -267,7 +267,7 @@ plan_source: plan.md
 
 ### Pi 集成烟测
 
-- `pi -e /Users/zard/long-horizon-pi-extension/index.ts` 能加载无 TypeScript 错误。
+- `pi -e <repo>/index.ts` 能加载无 TypeScript 错误。
 - `/lh status` 默认显示 single。
 - `/lh multi`、`/lh single` 可切换且 session resume 后保持。
 - single 完成后只触发一次当前 query 的 `agent_end`，不自动发送下一条 user message。
@@ -291,4 +291,3 @@ plan_source: plan.md
 - dependency graph 传递闭包。
 - 完整 acceptance engine、多 agent 冲突解决和 bash ownership 推断。
 - 自动 Git 初始化、baseline commit 和人工 approval gate。
-

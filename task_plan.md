@@ -19,7 +19,7 @@
 
 ## 当前阶段
 
-实现完成并通过单元测试、类型检查和 Pi 0.73.1 RPC 烟测。
+实现完成并进入发布前验证；当前分支已包含 plan snapshot/delta cache、tombstone、structure update、session resume 与 compaction generation。
 
 ## 实现结果
 
@@ -30,22 +30,27 @@
 - `src/ownership.ts` 只在 write/edit 成功后确认 ownership；bash 副作用保留为 unowned。
 - single 为默认模式；multi 通过 `/lh multi` 持续到 `/lh single`。
 - single completion 的 abort 延迟到工具结果返回之后；Pi 工具结果同时返回 `terminate: true`。
+- plan cache 在 generation 开始时追加完整 hidden snapshot；query/turn/agent_end 只追加最新 section、删除 tombstone 或 `__plan-structure__`。
+- session resume 从 hidden custom message details 恢复完整 manifest；成功 compaction 后追加新的 generation snapshot。
 
 ## 验证结果
 
-- `npm test`：8 个测试文件、46 个测试全部通过。
+- `npm test`：10 个测试文件、95 个测试全部通过（plan-cache 与 Pi adapter 回归已包含）。
 - `npm run typecheck`：通过。
-- `/opt/homebrew/bin/pi -e ... --help`：Pi 0.73.1 成功加载扩展入口。
-- RPC：`get_commands` 发现 `lh`；`/lh multi`、`/lh status`、`/lh single` 均成功执行。
+- `git diff --check`：通过。
+- `npm pack --dry-run`：package manifest、源码、测试和文档均进入 tarball。
+- `pi -e <repo>/index.ts --help`：Pi 0.73.1 成功加载扩展入口。
+- 隔离 Pi package 安装：`pi install <local-repo>` 成功，RPC `get_commands` 从 package manifest 发现 `lh`。
+- 干净临时目录：待本轮最终 diff 固定后重新执行 `npm ci`、`npm test`、`npm run typecheck`。
 
 ## 当前限制
 
 - 尚未在真实模型调用中运行完整项目任务；真实 verify 命令和自动 commit 已由注入式测试覆盖。
-- 实现仍位于 `feat/long-horizon-extension` worktree，尚未合并到插件目录的 `main`。
+- npm 对兼容目标 Pi 0.73.1 的上游依赖报告两个 high 告警；强制修复会破坏版本兼容，等待后续适配 `@earendil-works/pi-coding-agent` 新版本时处理。
 
 ## 已确认决策
 
-- 源码目录：`/Users/zard/long-horizon-pi-extension`
+- 源码目录：独立 `long-horizon-pi-extension` 仓库
 - 默认模式：`single`
 - `/lh multi` 持续到 `/lh single`
 - single：一次 query 一个 section，完成后结束当前 agent loop

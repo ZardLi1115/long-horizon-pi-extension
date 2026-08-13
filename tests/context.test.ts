@@ -78,7 +78,7 @@ describe("context builder", () => {
 		expect(dynamic).toContain("src/owned.ts");
 	});
 
-	it("uses the active working set instead of dumping an entire large plan", () => {
+	it("keeps plan content out of the high-frequency dynamic tail", () => {
 		const largePlan = parsePlan(
 			[
 				"### First\n<!-- id: first -->",
@@ -89,8 +89,19 @@ describe("context builder", () => {
 		);
 		const dynamic = buildDynamicContext(snapshot({ plan: largePlan }));
 
-		expect(dynamic).toContain("id: active");
+		expect(dynamic).not.toContain("## Plan working set");
+		expect(dynamic).not.toContain("id: active");
 		expect(dynamic).not.toContain("id: far-19");
+		expect(dynamic).toContain("## Active position");
+		expect(dynamic).toContain("## Git state");
+	});
+
+	it("defines snapshot update and tombstone precedence in the stable protocol", () => {
+		const stable = buildStableProtocol();
+
+		expect(stable).toContain("Plan Cached Snapshot is the baseline");
+		expect(stable).toContain("latest Plan Update wins");
+		expect(stable).toContain("deleted tombstone");
 	});
 
 	it("renders recovery hints for malformed state and verification failures", () => {

@@ -46,7 +46,6 @@ describe("section operations", () => {
 			id: "one",
 			verify: "npm test -- auth",
 			note: "auth section complete",
-			mode: "single",
 			run: makeRun("single"),
 			plan,
 			progress: makeProgress(),
@@ -81,7 +80,6 @@ describe("section operations", () => {
 		const result = await completeSection({
 			id: "one",
 			verify: "npm test -- auth",
-			mode: "multi",
 			run: makeRun("multi"),
 			plan,
 			progress: makeProgress(),
@@ -112,7 +110,6 @@ describe("section operations", () => {
 		let aborts = 0;
 		const result = await completeSection({
 			id: "one",
-			mode: "multi",
 			run: makeRun("multi"),
 			plan,
 			progress: makeProgress(),
@@ -134,7 +131,6 @@ describe("section operations", () => {
 	it("rejects a section other than the run lock", async () => {
 		const result = await completeSection({
 			id: "two",
-			mode: "single",
 			run: makeRun("single"),
 			plan,
 			progress: makeProgress(),
@@ -148,6 +144,55 @@ describe("section operations", () => {
 		expect(result.ok).toBe(false);
 		expect(result.status).toBe("rejected");
 		expect(result.message).toContain("locked section");
+	});
+
+	it("rejects completion when progress moved away from the run lock", async () => {
+		let persisted = 0;
+		const result = await completeSection({
+			id: "one",
+			run: makeRun("single"),
+			plan,
+			progress: { ...makeProgress(), active: "two" },
+			git,
+			persistProgress: async () => {
+				persisted += 1;
+			},
+			selectCommitPaths: () => ({ paths: [] }),
+			commit: async () => undefined,
+			abort: () => undefined,
+		});
+
+		expect(result.ok).toBe(false);
+		expect(result.status).toBe("rejected");
+		expect(result.message).toContain("active section changed");
+		expect(persisted).toBe(0);
+	});
+
+	it("rejects completion after the Git HEAD changes", async () => {
+		let persisted = 0;
+		let commits = 0;
+		const result = await completeSection({
+			id: "one",
+			run: makeRun("single"),
+			plan,
+			progress: makeProgress(),
+			git,
+			persistProgress: async () => {
+				persisted += 1;
+			},
+			refreshGit: async () => ({ ...git, head: "def" }),
+			selectCommitPaths: () => ({ paths: ["progress.md"] }),
+			commit: async () => {
+				commits += 1;
+			},
+			abort: () => undefined,
+		});
+
+		expect(result.ok).toBe(false);
+		expect(result.status).toBe("commit_failed");
+		expect(result.message).toContain("HEAD changed");
+		expect(commits).toBe(0);
+		expect(persisted).toBe(0);
 	});
 
 	it("reopens a completed section without touching Git history", async () => {
@@ -181,7 +226,6 @@ describe("section operations", () => {
 		const persisted: ProgressState[] = [];
 		const result = await completeSection({
 			id: "one",
-			mode: "single",
 			run: makeRun("single"),
 			plan,
 			progress: makeProgress(),
@@ -204,7 +248,6 @@ describe("section operations", () => {
 	it("reports when completion has no paths to commit", async () => {
 		const result = await completeSection({
 			id: "one",
-			mode: "single",
 			run: makeRun("single"),
 			plan,
 			progress: makeProgress(),
@@ -223,7 +266,6 @@ describe("section operations", () => {
 		let refreshed = false;
 		const result = await completeSection({
 			id: "one",
-			mode: "multi",
 			run: makeRun("multi"),
 			plan,
 			progress: makeProgress(),
@@ -240,5 +282,52 @@ describe("section operations", () => {
 
 		expect(refreshed).toBe(true);
 		expect(result.commitPaths).toEqual(["progress.md", "src/file.ts"]);
+	});
+
+	it("updates the multi-run HEAD baseline after a section commit", async () => {
+		let committed = false;
+		const result = await completeSection({
+			id: "one",
+			run: makeRun("multi"),
+			plan,
+			progress: makeProgress(),
+			git,
+			persistProgress: async () => undefined,
+			refreshGit: async () => ({ ...git, head: committed ? "def" : "abc" }),
+			selectCommitPaths: () => ({ paths: ["progress.md", "src/file.ts"] }),
+			commit: async () => {
+				committed = true;
+			},
+			abort: () => undefined,
+		});
+
+		expect(result.ok).toBe(true);
+		expect(result.run.sectionId).toBe("two");
+		expect(result.run.baseHead).toBe("def");
+	});
+
+	it("does not absorb newly unowned changes into the next multi-section baseline", async () => {
+		let committed = false;
+		const result = await completeSection({
+			id: "one",
+			run: { ...makeRun("multi"), unownedPaths: new Set(["unowned.ts"]) },
+			plan,
+			progress: makeProgress(),
+			git,
+			persistProgress: async () => undefined,
+			refreshGit: async () => ({
+				...git,
+				head: committed ? "def" : "abc",
+				dirtyPaths: committed ? ["unowned.ts"] : git.dirtyPaths,
+			}),
+			selectCommitPaths: () => ({ paths: ["progress.md", "src/file.ts"] }),
+			commit: async () => {
+				committed = true;
+			},
+			abort: () => undefined,
+		});
+
+		expect(result.ok).toBe(true);
+		expect(result.run.preexistingDirtyPaths).not.toContain("unowned.ts");
 	});
 });

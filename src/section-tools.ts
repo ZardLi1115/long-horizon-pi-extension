@@ -1,6 +1,6 @@
 import { advanceProgress, incrementAttempt, reopenProgress } from "./progress.js";
 import { canCompleteSection, completeRunSection } from "./run.js";
-import type { GitState, Mode, PlanDocument, ProgressState, RunState } from "./types.js";
+import type { GitState, PlanDocument, ProgressState, RunState } from "./types.js";
 import type { CommitPathSelection } from "./git.js";
 
 export interface VerifyResult {
@@ -22,7 +22,6 @@ export interface CompleteSectionInput {
 	id: string;
 	verify?: string;
 	note?: string;
-	mode: Mode;
 	run: RunState;
 	plan: PlanDocument;
 	progress: ProgressState;
@@ -69,6 +68,15 @@ export async function completeSection(input: CompleteSectionInput): Promise<Sect
 	if (!input.plan.byId.has(input.id)) {
 		return { ok: false, status: "rejected", message: `unknown section id: ${input.id}`, progress: input.progress, run: input.run };
 	}
+	if (input.progress.active !== input.run.sectionId) {
+		return {
+			ok: false,
+			status: "rejected",
+			message: `active section changed outside this run: expected ${input.run.sectionId}, found ${input.progress.active ?? "<none>"}`,
+			progress: input.progress,
+			run: input.run,
+		};
+	}
 
 	let status: SectionOperationResult["status"] = "unverified";
 	if (input.verify) {
@@ -91,11 +99,32 @@ export async function completeSection(input: CompleteSectionInput): Promise<Sect
 		status = "verified";
 	}
 
+	const boundaryGit = input.refreshGit ? await input.refreshGit() : input.git;
+	if (boundaryGit.head !== input.run.baseHead) {
+		return {
+			ok: false,
+			status: "commit_failed",
+			message: `Git HEAD changed during this run: expected ${input.run.baseHead ?? "<none>"}, found ${boundaryGit.head ?? "<none>"}`,
+			progress: input.progress,
+			run: input.run,
+		};
+	}
+
 	const nextProgress = advanceProgress(input.progress, orderedIds(input.plan), input.note);
 	await input.persistProgress(nextProgress);
 	const nextSectionId = nextProgress.active;
-	const nextRun = completeRunSection(input.run, input.id, nextSectionId);
+	let nextRun = completeRunSection(input.run, input.id, nextSectionId);
 	const currentGit = input.refreshGit ? await input.refreshGit() : input.git;
+	if (currentGit.head !== input.run.baseHead) {
+		await input.persistProgress(input.progress);
+		return {
+			ok: false,
+			status: "commit_failed",
+			message: `Git HEAD changed during this run: expected ${input.run.baseHead ?? "<none>"}, found ${currentGit.head ?? "<none>"}`,
+			progress: input.progress,
+			run: input.run,
+		};
+	}
 	const selection = input.selectCommitPaths(currentGit, nextRun, input.pluginTouchedPaths ?? ["progress.md"]);
 	if (selection.error) {
 		await input.persistProgress(input.progress);
@@ -120,7 +149,17 @@ export async function completeSection(input: CompleteSectionInput): Promise<Sect
 			commitPaths: selection.paths,
 		};
 	}
-	if (input.mode === "single") input.abort();
+	if (nextRun.mode === "multi" && !nextRun.completed && input.refreshGit) {
+		const committedGit = await input.refreshGit();
+		nextRun = {
+			...nextRun,
+			baseHead: committedGit.head,
+			preexistingDirtyPaths: [...input.run.preexistingDirtyPaths],
+			ownedPaths: new Set(),
+			unownedPaths: new Set(),
+		};
+	}
+	if (input.run.mode === "single") input.abort();
 	const noChangesMessage = selection.paths.length === 0 ? "; no changes to commit" : "";
 	return {
 		ok: true,

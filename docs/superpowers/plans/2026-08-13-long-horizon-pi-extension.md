@@ -56,8 +56,8 @@ Use Pi's installed package for runtime types and TypeBox for tool schemas:
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@mariozechner/pi-coding-agent": "file:/opt/homebrew/lib/node_modules/@mariozechner/pi-coding-agent",
-    "typebox": "file:/opt/homebrew/lib/node_modules/@mariozechner/pi-coding-agent/node_modules/typebox"
+    "@mariozechner/pi-coding-agent": "^0.73.1",
+    "typebox": "^1.1.24"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
@@ -231,7 +231,7 @@ Run `npm run typecheck`; expected: exit 0. Fix only API/type mismatches revealed
 
 - [ ] **Step 1: Install local development dependencies if needed**
 
-Run `npm install` from the implementation worktree only if `node_modules` is absent. Do not modify `/opt/homebrew/lib/node_modules`.
+Run `npm install` from the implementation worktree only if `node_modules` is absent. Do not modify the host Pi installation.
 
 - [ ] **Step 2: Run the full unit suite**
 
@@ -239,7 +239,7 @@ Run `npm test`; expected: all tests pass with zero failures.
 
 - [ ] **Step 3: Run the compiled-TypeScript loading check**
 
-Run `pi -e /Users/zard/long-horizon-pi-extension/.worktrees/implementation/index.ts --help` or the Pi equivalent that loads an extension without making a model request. Expected: Pi starts or prints help without an extension load/type error.
+Run `pi -e <repo>/index.ts --help` or the Pi equivalent that loads an extension without making a model request. Expected: Pi starts or prints help without an extension load/type error.
 
 - [ ] **Step 4: Run a temporary fixture smoke test**
 

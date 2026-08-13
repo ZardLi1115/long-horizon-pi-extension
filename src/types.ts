@@ -23,6 +23,51 @@ export interface PlanDocument {
 	conflictLines: number[];
 }
 
+export interface PlanCacheSection {
+	id: string;
+	source: string;
+	hash: string;
+}
+
+export interface PlanCacheDocument {
+	source: string;
+	planHash: string;
+	structureSource: string;
+	structureHash: string;
+	order: string[];
+	sections: Map<string, PlanCacheSection>;
+}
+
+export interface PlanCacheManifest {
+	version: 1;
+	generationId: string;
+	planHash: string;
+	structureHash: string;
+	order: string[];
+	sections: Array<{
+		id: string;
+		hash: string;
+	}>;
+}
+
+export interface PlanSnapshotDetails extends PlanCacheManifest {
+	kind: "snapshot";
+}
+
+export interface PlanUpdateDetails extends PlanCacheManifest {
+	kind: "update";
+	changedIds: string[];
+	deletedIds: string[];
+	structureChanged: boolean;
+}
+
+export interface PlanCacheDelta {
+	changedIds: string[];
+	deletedIds: string[];
+	structureChanged: boolean;
+	current: PlanCacheDocument;
+}
+
 export interface ProgressState {
 	active: string | null;
 	attempts: number;

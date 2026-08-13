@@ -8,17 +8,48 @@ import type {
 	ToolCallEvent,
 	ToolResultEvent,
 } from "@mariozechner/pi-coding-agent";
+import { compact, createEditToolDefinition, createWriteToolDefinition } from "@mariozechner/pi-coding-agent";
 import { buildDynamicContext, buildStableProtocol } from "./src/context-builder.js";
 import { commitPaths, readGitState, selectCommitPaths, type GitAdapter } from "./src/git.js";
 import { OwnershipTracker } from "./src/ownership.js";
+import {
+	createPlanManifest,
+	createSnapshotDetails,
+	createUpdateDetails,
+	diffPlanCache,
+	hasPlanCacheDelta,
+	parsePlanCacheDocument,
+	renderPlanSnapshot,
+	renderPlanUpdate,
+} from "./src/plan-cache.js";
 import { materializeMissingIds, parsePlan } from "./src/plan.js";
 import { parseProgress, serializeProgress, withDefaultActive } from "./src/progress.js";
 import { completeSection, reopenSection } from "./src/section-tools.js";
 import { prepareProgressForRun, startRun, syncRunPaths } from "./src/run.js";
-import type { ContextSnapshot, Mode, PlanDocument, ProgressState, RunState } from "./src/types.js";
+import {
+	safeAccessFile,
+	safeDeleteFile,
+	safeMkdir,
+	safeMoveFile,
+	safeReadFile,
+	safeRelativePath,
+	safeWriteFile,
+} from "./src/safe-fs.js";
+import type {
+	ContextSnapshot,
+	Mode,
+	PlanCacheDocument,
+	PlanCacheManifest,
+	PlanDocument,
+	PlanSnapshotDetails,
+	PlanUpdateDetails,
+	ProgressState,
+	RunState,
+} from "./src/types.js";
 
 const MODE_ENTRY = "long-horizon/mode";
 const DYNAMIC_CONTEXT_TYPE = "long-horizon/context";
+const PLAN_CACHE_TYPE = "long-horizon/plan-cache";
 const MAX_STATUS_OUTPUT = 1600;
 
 interface LoadedState {
@@ -38,25 +69,15 @@ function truncate(text: string): string {
 	return text.length > MAX_STATUS_OUTPUT ? `${text.slice(-MAX_STATUS_OUTPUT)}…` : text;
 }
 
-function safeRelative(cwd: string, input: string): string {
-	const absolute = path.resolve(cwd, input);
-	const relative = path.relative(path.resolve(cwd), absolute);
-	if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-		throw new Error(`path is outside cwd: ${input}`);
-	}
-	return relative.split(path.sep).join("/");
-}
-
-function assertSafeMutation(cwd: string, input: string): string {
-	const relative = safeRelative(cwd, input);
-	if (relative === ".git" || relative.startsWith(".git/")) throw new Error("refusing to mutate .git");
-	return relative;
-}
-
 function makeGitAdapter(pi: ExtensionAPI, cwd: string): GitAdapter {
 	return {
 		async exec(args) {
 			const result = await pi.exec("git", args, { cwd });
+			return { stdout: result.stdout, stderr: result.stderr, code: result.code };
+		},
+		async execWithEnv(args, env) {
+			const assignments = Object.entries(env).map(([key, value]) => `${key}=${value}`);
+			const result = await pi.exec("env", [...assignments, "git", ...args], { cwd });
 			return { stdout: result.stdout, stderr: result.stderr, code: result.code };
 		},
 	};
@@ -124,11 +145,184 @@ function hashFile(source: string): string {
 	return crypto.createHash("sha256").update(source).digest("hex");
 }
 
+interface PlanCacheEntryLike {
+	type?: string;
+	customType?: string;
+	details?: unknown;
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function hasUniqueStrings(values: string[]): boolean {
+	return new Set(values).size === values.length;
+}
+
+interface ParsedPlanCacheDetails {
+	kind: "snapshot" | "update";
+	manifest: PlanCacheManifest;
+}
+
+function parsePlanCacheDetails(value: unknown): ParsedPlanCacheDetails | null {
+	if (!value || typeof value !== "object") return null;
+	const candidate = value as Partial<PlanCacheManifest> & { kind?: unknown };
+	if (candidate.kind !== "snapshot" && candidate.kind !== "update") return null;
+	if (candidate.version !== 1 || typeof candidate.generationId !== "string" || !candidate.generationId) return null;
+	if (typeof candidate.planHash !== "string" || typeof candidate.structureHash !== "string") return null;
+	if (!isStringArray(candidate.order) || !hasUniqueStrings(candidate.order)) return null;
+	if (!Array.isArray(candidate.sections)) return null;
+	if (candidate.sections.length !== candidate.order.length) return null;
+	const sectionIds: string[] = [];
+	for (const section of candidate.sections) {
+		if (!section || typeof section !== "object") return null;
+		const typedSection = section as { id?: unknown; hash?: unknown };
+		if (typeof typedSection.id !== "string" || typeof typedSection.hash !== "string") return null;
+		sectionIds.push(typedSection.id);
+	}
+	if (!hasUniqueStrings(sectionIds) || sectionIds.some((id, index) => id !== candidate.order?.[index])) return null;
+	if (candidate.kind === "update") {
+		const update = candidate as Partial<PlanUpdateDetails>;
+		if (!isStringArray(update.changedIds) || !isStringArray(update.deletedIds) || typeof update.structureChanged !== "boolean") return null;
+		if (!hasUniqueStrings(update.changedIds) || !hasUniqueStrings(update.deletedIds)) return null;
+	}
+	return {
+		kind: candidate.kind,
+		manifest: {
+			version: 1,
+			generationId: candidate.generationId,
+			planHash: candidate.planHash,
+			structureHash: candidate.structureHash,
+			order: [...candidate.order],
+			sections: candidate.sections.map((section) => ({ id: section.id, hash: section.hash })),
+		},
+	};
+}
+
+function restorePlanCacheManifest(entries: PlanCacheEntryLike[]): PlanCacheManifest | null {
+	let restored: PlanCacheManifest | null = null;
+	for (const entry of entries) {
+		if (entry.type !== "custom_message" || entry.customType !== PLAN_CACHE_TYPE) continue;
+		const parsed = parsePlanCacheDetails(entry.details);
+		if (!parsed) continue;
+		if (parsed.kind === "snapshot") {
+			restored = parsed.manifest;
+			continue;
+		}
+		if (restored?.generationId === parsed.manifest.generationId) restored = parsed.manifest;
+	}
+	return restored;
+}
+
+function asPlanCacheMessage(
+	content: string,
+	details: PlanSnapshotDetails | PlanUpdateDetails,
+) {
+	return {
+		customType: PLAN_CACHE_TYPE,
+		content,
+		display: false,
+		details,
+	};
+}
+
 export default function longHorizonExtension(pi: ExtensionAPI): void {
 	let mode: Mode = "single";
 	let run: RunState | null = null;
 	let ownership: OwnershipTracker | null = null;
 	let pluginTouchedPaths = new Set<string>();
+	let planCacheManifest: PlanCacheManifest | null = null;
+	let pendingInitialSnapshot = false;
+	let planCacheQueue: Promise<void> = Promise.resolve();
+
+	const readPlanCache = async (cwd: string): Promise<PlanCacheDocument | null> => {
+		try {
+			const planPath = path.join(cwd, "plan.md");
+			const source = await readOptional(planPath);
+			parsePlan(source);
+			const materialized = materializeMissingIds(source);
+			if (materialized.changed) {
+				await safeWriteFile(cwd, "plan.md", materialized.source);
+				pluginTouchedPaths.add("plan.md");
+			}
+			return parsePlanCacheDocument(materialized.source);
+		} catch {
+			return null;
+		}
+	};
+
+	const enqueuePlanCache = <T>(operation: () => Promise<T>): Promise<T> => {
+		const next = planCacheQueue.then(operation, operation);
+		planCacheQueue = next.then(
+			() => undefined,
+			() => undefined,
+		);
+		return next;
+	};
+
+	const persistCurrentPlanDelta = (ctx: ExtensionContext, delivery: "steer" | "idle"): Promise<boolean> =>
+		enqueuePlanCache(async () => {
+			const document = await readPlanCache(ctx.cwd);
+			if (!document) return false;
+			if (!planCacheManifest) {
+				const generationId = crypto.randomUUID();
+				const details = createSnapshotDetails(generationId, document);
+				await pi.sendMessage(asPlanCacheMessage(renderPlanSnapshot(document), details),
+					delivery === "steer" ? { deliverAs: "steer", triggerTurn: false } : { triggerTurn: false });
+				planCacheManifest = createPlanManifest(generationId, document);
+				pendingInitialSnapshot = false;
+				return true;
+			}
+
+			const delta = diffPlanCache(planCacheManifest, document);
+			if (!hasPlanCacheDelta(delta)) return false;
+			const details = createUpdateDetails(planCacheManifest.generationId, delta);
+			await pi.sendMessage(asPlanCacheMessage(renderPlanUpdate(delta), details),
+				delivery === "steer" ? { deliverAs: "steer", triggerTurn: false } : { triggerTurn: false });
+			planCacheManifest = createPlanManifest(planCacheManifest.generationId, document);
+			pendingInitialSnapshot = false;
+			return true;
+		});
+
+	const writeTool = createWriteToolDefinition(process.cwd());
+	const safeWriteTool = {
+		...writeTool,
+		async execute(
+			toolCallId: Parameters<typeof writeTool.execute>[0],
+			input: Parameters<typeof writeTool.execute>[1],
+			signal: Parameters<typeof writeTool.execute>[2],
+			onUpdate: Parameters<typeof writeTool.execute>[3],
+			ctx: ExtensionContext,
+		) {
+			const definition = createWriteToolDefinition(ctx.cwd, {
+				operations: {
+					mkdir: (directory) => safeMkdir(ctx.cwd, directory),
+					writeFile: (filePath, content) => safeWriteFile(ctx.cwd, filePath, content),
+				},
+			});
+			return definition.execute(toolCallId, input, signal, onUpdate, ctx);
+		},
+	};
+	const editTool = createEditToolDefinition(process.cwd());
+	const safeEditTool = {
+		...editTool,
+		async execute(
+			toolCallId: Parameters<typeof editTool.execute>[0],
+			input: Parameters<typeof editTool.execute>[1],
+			signal: Parameters<typeof editTool.execute>[2],
+			onUpdate: Parameters<typeof editTool.execute>[3],
+			ctx: ExtensionContext,
+		) {
+			const definition = createEditToolDefinition(ctx.cwd, {
+				operations: {
+					access: (filePath) => safeAccessFile(ctx.cwd, filePath),
+					readFile: (filePath) => safeReadFile(ctx.cwd, filePath),
+					writeFile: (filePath, content) => safeWriteFile(ctx.cwd, filePath, content),
+				},
+			});
+			return definition.execute(toolCallId, input, signal, onUpdate, ctx);
+		},
+	};
 
 	const ensureRun = async (ctx: ExtensionContext, forceNewRun = false): Promise<LoadedState> => {
 		const previousRun = forceNewRun ? run : null;
@@ -140,11 +334,11 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 		let state = await loadState(pi, ctx.cwd);
 		const initialPreexistingDirtyPaths = [...new Set([...state.git.dirtyPaths, ...state.git.stagedPaths])];
 		if (state.planPath && state.plan.sections.some((section) => section.generatedId)) {
-			const source = await readOptional(state.planPath);
-			const materialized = materializeMissingIds(source);
-			if (materialized.changed) {
-				await fs.writeFile(state.planPath, materialized.source, "utf8");
-				pluginTouchedPaths.add("plan.md");
+				const source = await readOptional(state.planPath);
+				const materialized = materializeMissingIds(source);
+				if (materialized.changed) {
+					await safeWriteFile(ctx.cwd, "plan.md", materialized.source);
+					pluginTouchedPaths.add("plan.md");
 				state = await loadState(pi, ctx.cwd);
 			}
 		}
@@ -153,7 +347,7 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 		if (forceNewRun && state.progress.active) {
 			const prepared = prepareProgressForRun(state.progress, previousRun);
 			if (prepared.progress.attempts !== state.progress.attempts) {
-				await fs.writeFile(state.progressPath, serializeProgress(prepared.progress), "utf8");
+					await safeWriteFile(ctx.cwd, "progress.md", serializeProgress(prepared.progress));
 				pluginTouchedPaths.add("progress.md");
 				state = { ...state, progress: prepared.progress };
 			}
@@ -165,8 +359,7 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 	};
 
 	const persistProgress = async (ctx: ExtensionContext, state: ProgressState): Promise<void> => {
-		const progressPath = path.join(ctx.cwd, "progress.md");
-		await fs.writeFile(progressPath, serializeProgress(state), "utf8");
+		await safeWriteFile(ctx.cwd, "progress.md", serializeProgress(state));
 		pluginTouchedPaths.add("progress.md");
 	};
 
@@ -185,11 +378,11 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 			const state = await ensureRun(ctx);
 			if (!run || !ownership) throw new Error("long-horizon run is not initialized");
 			run = syncRunPaths(run, state.git, ownership.owned());
+			const runMode = run.mode;
 			const result = await completeSection({
 				id: params.id,
 				verify: params.verify,
 				note: params.note,
-				mode,
 				run,
 				plan: state.plan,
 				progress: state.progress,
@@ -202,15 +395,18 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 				refreshGit: async () => readGitState(makeGitAdapter(pi, ctx.cwd)),
 				selectCommitPaths: (gitState, runState, touched) => selectCommitPaths(runState, gitState, touched),
 				commit: async (paths, message) => {
-					const result = await commitPaths(makeGitAdapter(pi, ctx.cwd), paths, message);
+					const result = await commitPaths(makeGitAdapter(pi, ctx.cwd), paths, message, run?.baseHead);
 					if (result.code !== 0) throw new Error(truncate(result.stderr || result.stdout || `git commit exited with ${result.code}`));
 				},
 				abort: () => setTimeout(() => ctx.abort(), 0),
 				pluginTouchedPaths: ["progress.md", ...pluginTouchedPaths],
 			});
 			run = result.run;
-			if (result.ok) pluginTouchedPaths = new Set();
-			return { content: textContent(result.message), details: result, terminate: result.ok && mode === "single" };
+			if (result.ok) {
+				pluginTouchedPaths = new Set();
+				if (!result.run.completed) ownership = new OwnershipTracker(ctx.cwd);
+			}
+			return { content: textContent(result.message), details: result, terminate: result.ok && runMode === "single" };
 		},
 	};
 
@@ -230,6 +426,12 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 				progress: state.progress,
 				persistProgress: (next) => persistProgress(ctx, next),
 			});
+			if (result.ok) {
+				const runMode = run?.mode ?? mode;
+				const dirtyAtReopen = [...new Set([...state.git.dirtyPaths, ...state.git.stagedPaths])];
+				run = startRun(runMode, result.progress, state.git, run, dirtyAtReopen);
+				ownership = new OwnershipTracker(ctx.cwd);
+			}
 			return { content: textContent(result.message), details: result };
 		},
 	};
@@ -242,8 +444,8 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 		parameters: Type.Object({ path: Type.String() }),
 		executionMode: "sequential" as const,
 		async execute(_toolCallId: string, params: { path: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
-			const relative = assertSafeMutation(ctx.cwd, params.path);
-			await fs.unlink(path.join(ctx.cwd, relative));
+			const relative = safeRelativePath(ctx.cwd, params.path);
+			await safeDeleteFile(ctx.cwd, relative);
 			ownership?.customSuccess("delete", [relative]);
 			return { content: textContent(`deleted ${relative}`), details: { path: relative } };
 		},
@@ -257,20 +459,16 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 		parameters: Type.Object({ from: Type.String(), to: Type.String() }),
 		executionMode: "sequential" as const,
 		async execute(_toolCallId: string, params: { from: string; to: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
-			const from = assertSafeMutation(ctx.cwd, params.from);
-			const to = assertSafeMutation(ctx.cwd, params.to);
-			try {
-				await fs.access(path.join(ctx.cwd, to));
-				throw new Error(`move target already exists: ${to}`);
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-			}
-			await fs.rename(path.join(ctx.cwd, from), path.join(ctx.cwd, to));
+			const from = safeRelativePath(ctx.cwd, params.from);
+			const to = safeRelativePath(ctx.cwd, params.to);
+			await safeMoveFile(ctx.cwd, from, to);
 			ownership?.customSuccess("move", [from, to]);
 			return { content: textContent(`moved ${from} -> ${to}`), details: { from, to } };
 		},
 	};
 
+	pi.registerTool(safeWriteTool);
+	pi.registerTool(safeEditTool);
 	pi.registerTool(completeTool);
 	pi.registerTool(reopenTool);
 	pi.registerTool(deleteTool);
@@ -288,8 +486,8 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 				return;
 			}
 			if (command === "status") {
-				const state = await ensureRun(ctx);
-				ctx.ui.notify(statusText(mode, state, run), "info");
+				const state = await loadState(pi, ctx.cwd);
+				ctx.ui.notify(statusText(run?.mode ?? mode, state, run), "info");
 				return;
 			}
 			ctx.ui.notify("Usage: /lh single | /lh multi | /lh status", "warning");
@@ -301,18 +499,39 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 		run = null;
 		ownership = new OwnershipTracker(ctx.cwd);
 		pluginTouchedPaths = new Set();
+		planCacheManifest = restorePlanCacheManifest(ctx.sessionManager.getEntries() as PlanCacheEntryLike[]);
+		pendingInitialSnapshot = planCacheManifest === null;
 	});
 
 	pi.on("before_agent_start", async (_event, ctx) => {
-			await ensureRun(ctx, true);
-		return { systemPrompt: `${_event.systemPrompt}\n\n${buildStableProtocol()}` };
+		await ensureRun(ctx, true);
+		const document = await readPlanCache(ctx.cwd);
+		let message;
+		if (document && (pendingInitialSnapshot || !planCacheManifest)) {
+			const generationId = crypto.randomUUID();
+			const details = createSnapshotDetails(generationId, document);
+			message = asPlanCacheMessage(renderPlanSnapshot(document), details);
+			planCacheManifest = createPlanManifest(generationId, document);
+			pendingInitialSnapshot = false;
+		} else if (document && planCacheManifest) {
+			const delta = diffPlanCache(planCacheManifest, document);
+			if (hasPlanCacheDelta(delta)) {
+				const details = createUpdateDetails(planCacheManifest.generationId, delta);
+				message = asPlanCacheMessage(renderPlanUpdate(delta), details);
+				planCacheManifest = createPlanManifest(planCacheManifest.generationId, document);
+			}
+		}
+		return {
+			systemPrompt: `${_event.systemPrompt}\n\n${buildStableProtocol()}`,
+			...(message ? { message } : {}),
+		};
 	});
 
 	pi.on("context", async (event, ctx) => {
 		const state = await ensureRun(ctx);
 		if (run && ownership) run = syncRunPaths(run, state.git, ownership.owned());
 		const snapshot: ContextSnapshot = {
-			mode,
+			mode: run?.mode ?? mode,
 			plan: state.plan,
 			progress: state.progress,
 			git: state.git,
@@ -339,11 +558,18 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 		};
 	});
 
-	pi.on("tool_call", async (event: ToolCallEvent) => {
+	pi.on("tool_call", async (event: ToolCallEvent, ctx) => {
 		if (!ownership) return;
 		if (event.toolName === "write" || event.toolName === "edit") {
 			const input = event.input as { path?: unknown };
-			if (typeof input.path === "string") ownership.pending(event.toolCallId, event.toolName, input.path);
+			if (typeof input.path === "string") {
+				try {
+					const relative = safeRelativePath(ctx.cwd, input.path);
+					ownership.pending(event.toolCallId, event.toolName, relative);
+				} catch (error) {
+					return { block: true, reason: error instanceof Error ? error.message : String(error) };
+				}
+			}
 		}
 	});
 
@@ -352,29 +578,61 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 		if (event.toolName === "write" || event.toolName === "edit") ownership.result(event.toolCallId, event.isError);
 	});
 
+	pi.on("turn_end", async (_event, ctx) => {
+		// Coalesce all filesystem changes made during this turn into one final update.
+		await persistCurrentPlanDelta(ctx, "steer");
+	});
+
 	pi.on("agent_end", async (_event, ctx) => {
-		if (!run || run.completed || !ownership) return;
-		const state = await ensureRun(ctx);
-		run = syncRunPaths(run, state.git, ownership.owned());
-		ctx.ui.notify(
-			`long-horizon run incomplete\nactive: ${state.progress.active ?? "<none>"}\nowned: ${[...run.ownedPaths].sort().join(", ") || "<none>"}\nunowned: ${[...run.unownedPaths].sort().join(", ") || "<none>"}\nGit dirty: ${state.git.dirtyPaths.join(", ") || "<none>"}`,
-			"warning",
-		);
+		if (run && !run.completed && ownership) {
+			const state = await ensureRun(ctx);
+			run = syncRunPaths(run, state.git, ownership.owned());
+			ctx.ui.notify(
+				`long-horizon run incomplete\nactive: ${state.progress.active ?? "<none>"}\nowned: ${[...run.ownedPaths].sort().join(", ") || "<none>"}\nunowned: ${[...run.unownedPaths].sort().join(", ") || "<none>"}\nGit dirty: ${state.git.dirtyPaths.join(", ") || "<none>"}`,
+				"warning",
+			);
+		}
+		await persistCurrentPlanDelta(ctx, "idle");
+	});
+
+	pi.on("session_compact", async (_event, ctx) => {
+		await enqueuePlanCache(async () => {
+			try {
+				const document = await readPlanCache(ctx.cwd);
+				if (!document) throw new Error("plan.md could not be read or parsed after compaction");
+				const generationId = crypto.randomUUID();
+				const details = createSnapshotDetails(generationId, document);
+				await pi.sendMessage(asPlanCacheMessage(renderPlanSnapshot(document), details), { triggerTurn: false });
+				planCacheManifest = createPlanManifest(generationId, document);
+				pendingInitialSnapshot = false;
+			} catch (error) {
+				planCacheManifest = null;
+				pendingInitialSnapshot = true;
+				ctx.ui.notify(
+					`Long Horizon plan snapshot after compaction failed; it will be rebuilt before the next model call: ${error instanceof Error ? error.message : String(error)}`,
+					"warning",
+				);
+			}
+		});
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
-		const state = await ensureRun(ctx);
+		const state = await loadState(pi, ctx.cwd);
 		const planSource = await readOptional(state.planPath);
-		const details = {
-			compactedAtHead: state.git.head,
-			active: state.progress.active,
-			mode,
-			planHash: planSource ? hashFile(planSource) : null,
-		};
+		const effectiveMode = run?.mode ?? mode;
+		if (!ctx.model) {
+			ctx.ui.notify("Long Horizon compaction: no active model; using Pi default compaction", "warning");
+			return;
+		}
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+		if (!auth.ok || !auth.apiKey) {
+			ctx.ui.notify("Long Horizon compaction: model auth unavailable; using Pi default compaction", "warning");
+			return;
+		}
 		const memory = [
 			"## Execution Position",
 			`active: ${state.progress.active ?? "<none>"}`,
-			`mode: ${mode}`,
+			`mode: ${effectiveMode}`,
 			"plan_source: plan.md",
 			"",
 			"## Working Memory",
@@ -382,13 +640,37 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 			`tried: ${state.progress.tried.join(" | ") || "<none>"}`,
 			`next: ${state.progress.next.join(" | ") || "<none>"}`,
 		].join("\n");
-		return {
-			compaction: {
-				summary: memory,
-				firstKeptEntryId: event.preparation.firstKeptEntryId,
-				tokensBefore: event.preparation.tokensBefore,
-				details,
-			},
-		};
+		try {
+			const nativeCompaction = await compact(
+				event.preparation,
+				ctx.model,
+				auth.apiKey,
+				auth.headers,
+				[
+					event.customInstructions,
+					"Preserve user goals, constraints, key decisions, hypotheses, debugging progress, open questions, and next steps.",
+					"Do not copy the full plan.md, progress.md, or Git history because those canonical artifacts are reloaded from disk.",
+				].filter(Boolean).join("\n"),
+				event.signal,
+			);
+			return {
+				compaction: {
+					summary: `${nativeCompaction.summary.trim()}\n\n${memory}`,
+					firstKeptEntryId: event.preparation.firstKeptEntryId,
+					tokensBefore: event.preparation.tokensBefore,
+						details: {
+							...(typeof nativeCompaction.details === "object" && nativeCompaction.details !== null ? nativeCompaction.details : {}),
+							compactedAtHead: state.git.head,
+							active: state.progress.active,
+							mode: effectiveMode,
+							planHash: planSource ? hashFile(planSource) : null,
+							planCacheGenerationId: planCacheManifest?.generationId ?? null,
+						},
+				},
+			};
+		} catch (error) {
+			ctx.ui.notify(`Long Horizon compaction failed; using Pi default: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			return;
+		}
 	});
 }
