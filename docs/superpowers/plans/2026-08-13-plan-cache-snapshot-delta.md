@@ -4,7 +4,7 @@
 
 **Goal:** Replace per-call plan working-set injection with hidden persistent full-plan snapshots and append-only section/structure updates that improve prompt-prefix cache reuse while preserving exact canonical `plan.md` semantics.
 
-**Architecture:** Add a host-agnostic `src/plan-cache.ts` module that splits exact section sources, builds a structure skeleton, hashes manifests, diffs observed and current plans, and renders snapshot/update messages. The Pi adapter restores manifests from hidden custom-message details, persists snapshots and updates at lifecycle boundaries, and retains only progress/Git/ownership in the temporary context hook. A successful compaction starts a new snapshot generation; failed or cancelled compaction leaves the previous generation intact.
+**Architecture:** Add a host-agnostic `src/plan-cache.ts` module that splits exact section sources, builds a structure skeleton, hashes manifests, diffs observed and current plans, and renders snapshot/update messages. The Pi adapter restores manifests from hidden custom-message details, persists snapshots and updates at lifecycle boundaries, and adds one immutable progress/Git/ownership Query Snapshot per user query. A successful compaction starts a new snapshot generation; failed or cancelled compaction leaves the previous generation intact.
 
 **Tech Stack:** TypeScript, Node.js `crypto`, Pi Coding Agent 0.73.1 Extension API, Vitest.
 
@@ -306,7 +306,7 @@ git add src/plan-cache.ts tests/plan-cache.test.ts
 git commit -m "feat: diff and render plan cache updates"
 ```
 
-## Task 3: Remove plan content from temporary dynamic context
+## Task 3: Remove plan content from the per-query Query Snapshot
 
 **Files:**
 - Modify: `src/context-builder.ts`

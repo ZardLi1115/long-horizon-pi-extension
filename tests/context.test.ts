@@ -67,6 +67,7 @@ describe("context builder", () => {
 
 		expect(stable).toContain("complete_section");
 		expect(stable).toContain("record_attempt_failure");
+		expect(stable.toLowerCase()).toContain("query snapshot");
 		expect(stable).toContain("single");
 		expect(stable).toContain("multi");
 		expect(stable).toContain("plan.md");
@@ -74,6 +75,7 @@ describe("context builder", () => {
 
 		const dynamic = buildDynamicContext(snapshot());
 		expect(dynamic).toContain("abc123");
+		expect(dynamic).toContain("[Long-Horizon Query Snapshot]");
 		expect(dynamic).toContain("active");
 		expect(dynamic).toContain("src/owned.ts");
 	});

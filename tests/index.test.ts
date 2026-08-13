@@ -59,7 +59,80 @@ async function createPlanCacheFixture(planSource: string, entries: unknown[] = [
 	return { cwd, handlers, sent, tools, ctx, pi };
 }
 
+async function runBeforeAgentStart(fixture: Awaited<ReturnType<typeof createPlanCacheFixture>>, prompt = "query") {
+	const results: any[] = [];
+	for (const handler of fixture.handlers.get("before_agent_start") ?? []) {
+		const result = await handler({ prompt, systemPrompt: "base" }, fixture.ctx);
+		if (result) results.push(result);
+	}
+	return results;
+}
+
 describe("Pi extension wiring", () => {
+	it("creates one immutable query snapshot and preserves the append-only transcript", async () => {
+		const fixture = await createPlanCacheFixture("### One\n<!-- id: one -->\n");
+		expect(fixture.handlers.get("context")).toBeUndefined();
+
+		const beforeResults = await runBeforeAgentStart(fixture, "first query");
+		const dynamicResult = beforeResults.find((result) => result.message?.customType === "long-horizon/context");
+		expect(dynamicResult?.message?.content).toContain("attempts: 0");
+
+		const firstCallMessages = [
+			{ role: "user", content: [{ type: "text", text: "first query" }] },
+			...beforeResults.map((result) => ({ role: "custom", ...result.message })),
+		];
+		const secondCallInput = [
+			...firstCallMessages,
+			{ role: "assistant", content: [{ type: "text", text: "reading" }] },
+			{ role: "toolResult", toolCallId: "read-1", toolName: "read", content: [{ type: "text", text: "ok" }] },
+		];
+
+		expect(secondCallInput.slice(0, firstCallMessages.length)).toEqual(firstCallMessages);
+		expect(secondCallInput.filter((message: any) => message.customType === "long-horizon/context")).toHaveLength(1);
+	});
+
+	it("does not refresh the query snapshot after tool state changes", async () => {
+		const fixture = await createPlanCacheFixture("### One\n<!-- id: one -->\n");
+
+		const beforeResults = await runBeforeAgentStart(fixture, "first query");
+		const dynamic = beforeResults.find((result) => result.message?.customType === "long-horizon/context");
+		const snapshotContent = dynamic.message.content;
+		await fixture.tools.get("record_attempt_failure").execute(
+			"attempt-1",
+			{ id: "one", tried: "focused test", blocker: "assertion failed", next: "inspect fixture" },
+			undefined,
+			undefined,
+			fixture.ctx,
+		);
+
+		const messages = beforeResults.map((result) => ({ role: "custom", ...result.message }));
+
+		expect(messages.find((message) => message.customType === "long-horizon/context")?.content).toBe(
+			snapshotContent,
+		);
+		expect(snapshotContent).toContain("attempts: 0");
+	});
+
+	it("creates a fresh dynamic snapshot for the next user query", async () => {
+		const fixture = await createPlanCacheFixture("### One\n<!-- id: one -->\n");
+
+		const firstResults = await runBeforeAgentStart(fixture, "first query");
+		await fixture.tools.get("record_attempt_failure").execute(
+			"attempt-1",
+			{ id: "one", tried: "focused test", blocker: "assertion failed", next: "inspect fixture" },
+			undefined,
+			undefined,
+			fixture.ctx,
+		);
+		const secondResults = await runBeforeAgentStart(fixture, "second query");
+
+		const firstSnapshot = firstResults.find((result) => result.message?.customType === "long-horizon/context")?.message?.content;
+		const secondSnapshot = secondResults.find((result) => result.message?.customType === "long-horizon/context")?.message?.content;
+		expect(firstSnapshot).toContain("attempts: 0");
+		expect(secondSnapshot).toContain("attempts: 1");
+		expect(secondSnapshot).not.toBe(firstSnapshot);
+	});
+
 	it("does not increase attempts when agent turns start", async () => {
 		const fixture = await createPlanCacheFixture("### One\n<!-- id: one -->\n");
 
@@ -88,6 +161,9 @@ describe("Pi extension wiring", () => {
 
 		expect(result.details.ok).toBe(true);
 		expect(result.details.progress.attempts).toBe(1);
+		expect(result.content[0].text).toContain("attempts: 1");
+		expect(result.content[0].text).toContain("blocker: assertion still fails");
+		expect(result.content[0].text).toContain("next: inspect fixture");
 		expect(await fs.readFile(path.join(fixture.cwd, "progress.md"), "utf8")).toContain("attempts: 1");
 	});
 
@@ -695,10 +771,10 @@ describe("Pi extension wiring", () => {
 		} as unknown as ExtensionContext;
 		await handlers.get("session_start")?.[0]?.({ reason: "startup" }, ctx);
 		await handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "base" }, ctx);
-		const contextResult = await handlers.get("context")?.[0]?.({ messages: [] }, ctx);
+		const beforeResult = await handlers.get("before_agent_start")?.[1]?.({ systemPrompt: "base" }, ctx);
 
 		expect(await fs.readFile(path.join(cwd, "plan.md"), "utf8")).toContain("<!-- id: first-section -->");
-		expect((contextResult as { messages: Array<{ content: string }> }).messages.at(-1)?.content).toContain(
+		expect((beforeResult as { message: { content: string } }).message.content).toContain(
 			"active section is missing from plan.md: missing",
 		);
 	});
@@ -776,10 +852,10 @@ describe("Pi extension wiring", () => {
 		} as unknown as ExtensionContext;
 		await handlers.get("session_start")?.[0]?.({ reason: "startup" }, ctx);
 		await handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "base" }, ctx);
-		const contextResult = await handlers.get("context")?.[0]?.({ messages: [] }, ctx);
+		const beforeResult = await handlers.get("before_agent_start")?.[1]?.({ systemPrompt: "base" }, ctx);
 		await handlers.get("agent_end")?.[0]?.({ messages: [] }, ctx);
 
-		expect((contextResult as { messages: Array<{ content: string }> }).messages.at(-1)?.content).toContain(
+		expect((beforeResult as { message: { content: string } }).message.content).toContain(
 			"run unowned: generated.txt",
 		);
 		expect(notify.mock.calls.at(-1)?.[0]).toContain("unowned: generated.txt");
@@ -1017,11 +1093,18 @@ describe("Pi extension wiring", () => {
 		await handlers.get("tool_call")?.[0]?.({ toolName: "write", toolCallId: "write-1", input: { path: "owned.ts" } }, ctx);
 		await handlers.get("tool_result")?.[0]?.({ toolName: "write", toolCallId: "write-1", isError: false }, ctx);
 		status = " M owned.ts\0 M progress.md\0";
-		await tools.get("complete_section").execute("complete-1", { id: "one", skipVerify: true }, undefined, undefined, ctx);
+		const firstResult = await tools.get("complete_section").execute(
+			"complete-1",
+			{ id: "one", skipVerify: true },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(firstResult.content[0].text).toContain("next active: two");
 		status = " M owned.ts\0";
 
-		const contextResult = await handlers.get("context")?.[0]?.({ messages: [] }, ctx);
-		const dynamic = (contextResult as { messages: Array<{ content: string }> }).messages.at(-1)?.content ?? "";
+		const nextQuery = await handlers.get("before_agent_start")?.[1]?.({ systemPrompt: "base" }, ctx);
+		const dynamic = (nextQuery as { message: { content: string } }).message.content;
 		expect(dynamic).toContain("run owned: <none>");
 		expect(dynamic).toContain("run unowned: owned.ts");
 
@@ -1038,5 +1121,6 @@ describe("Pi extension wiring", () => {
 
 		expect(secondResult.details.ok).toBe(true);
 		expect(secondResult.details.commitPaths).toEqual(["progress.md", "second.ts"]);
+		expect(secondResult.content[0].text).toContain("next active: <none>");
 	});
 });

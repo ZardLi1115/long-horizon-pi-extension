@@ -4,7 +4,8 @@ export function buildStableProtocol(): string {
 	return [
 		"[Long-Horizon Protocol]",
 		"Canonical state lives in plan.md, progress.md, and Git.",
-		"Read the dynamic state supplied before each model call; do not invent a different active section.",
+		"Read the Long-Horizon Query Snapshot supplied at the start of this user query; do not invent a different active section.",
+		"The Query Snapshot may be stale after tools run; use tool results for state changes, and rely on runtime checks for correctness.",
 		"Use complete_section for a verified or explicitly unverified section completion.",
 		"Only call record_attempt_failure after a concrete attempt has failed or a concrete approach has been abandoned; ordinary agent turns and verification failures do not increment attempts automatically.",
 		"Use reopen_section when a completed section must be revisited.",
@@ -18,7 +19,7 @@ export function buildStableProtocol(): string {
 export function buildDynamicContext(snapshot: ContextSnapshot): string {
 	const run = snapshot.run;
 	const lines = [
-		"[Long-Horizon Dynamic State]",
+		"[Long-Horizon Query Snapshot]",
 		`mode: ${snapshot.mode}`,
 		`plan: ${snapshot.planPath}`,
 		`progress: ${snapshot.progressPath}`,

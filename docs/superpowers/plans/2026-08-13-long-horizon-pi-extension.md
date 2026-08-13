@@ -19,7 +19,7 @@
 - Create: `src/types.ts` — plan, progress, Git, run, and context types.
 - Create: `src/plan.ts` — plan parsing, ID generation, metadata, conflict detection, and plan working set.
 - Create: `src/progress.ts` — bounded YAML-like progress parsing, normalization, transitions, and serialization.
-- Create: `src/context-builder.ts` — dynamic context block and stable protocol prompt.
+- Create: `src/context-builder.ts` — per-query Query Snapshot block and stable protocol prompt.
 - Create: `src/git.ts` — Git command adapter, status classification, safe commit path selection, and output truncation.
 - Create: `src/ownership.ts` — pending/owned/unowned path tracking for write/edit and custom file tools.
 - Create: `src/run.ts` — run initialization, active section locking, attempts, and completion bookkeeping.
@@ -178,7 +178,7 @@ Run `npm test -- tests/context.test.ts`; expected: FAIL because `src/context-bui
 
 - [ ] **Step 3: Implement deterministic context rendering**
 
-Provide `buildStableProtocol()` and `buildDynamicContext(snapshot)`. Keep dynamic data out of `before_agent_start.message`; return it as a hidden custom message from the Pi context hook. Include a compact owned/unowned summary.
+Provide `buildStableProtocol()` and `buildDynamicContext(snapshot)`. Return the Query Snapshot as a hidden custom message from `before_agent_start`; do not register a per-request `context` hook for it. Include a compact owned/unowned summary.
 
 - [ ] **Step 4: Write failing section-operation tests**
 

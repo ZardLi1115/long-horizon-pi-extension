@@ -6,7 +6,7 @@ Pi is the first host adapter. The planning, progress, Run, ownership, and Git tr
 
 ## What it does
 
-- Reloads `plan.md`, `progress.md`, and Git state before model calls.
+- Captures `plan.md`, `progress.md`, and Git state once at the start of each user query.
 - Defaults to one active section per user query (`single`).
 - Supports persistent `/lh multi` mode for completing several sections in one query while committing each section separately.
 - Tracks write/edit/delete/move ownership; only files explicitly owned by the run or touched by the runtime are selected for automatic commits.
@@ -122,7 +122,9 @@ At the beginning of a cache generation, the extension adds the complete `plan.md
 
 Deleted sections are represented by tombstones. Changes to chapter text, section order, or other text outside sections append a `__plan-structure__` snapshot. Human edits, agent tools, bash, scripts, and external editors are handled identically because the extension diffs the canonical file on disk.
 
-After a successful Pi compaction, a new full snapshot and generation ID are appended. Failed or cancelled compaction does not reset the existing generation. Progress, Git, ownership, and recovery hints remain in the temporary dynamic context tail, so they do not repeatedly expand the stable plan prefix.
+At the start of each user query, the extension appends one hidden `[Long-Horizon Query Snapshot]` containing the current progress, Git, ownership, and recovery state. That snapshot remains unchanged throughout the agent loop; `record_attempt_failure` and `complete_section` return state changes directly in their tool results, while runtime checks re-read canonical files and Git before performing sensitive operations. The extension does not use Pi's per-request `context` hook for this state.
+
+After a successful Pi compaction, a new full plan snapshot and generation ID are appended. Failed or cancelled compaction does not reset the existing generation.
 
 Ownership is recorded only after a successful `write`, `edit`, `delete`, or `move`. The extension also stores the resulting content state and refuses section completion if an owned file was changed later by a formatter, verification command, shell command, or another external process. Dirty paths left at a section boundary are reported as unowned until the next run explicitly owns them. The current version intentionally does not protect user edits that overlap a path the agent or runtime owns; hunk-level ownership is a later improvement.
 

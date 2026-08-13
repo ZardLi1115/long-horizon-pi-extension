@@ -448,7 +448,16 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 				progress: state.progress,
 				persistProgress: (next) => persistProgress(ctx, next),
 			});
-			return { content: textContent(result.message), details: result };
+			const content = result.ok
+				? [
+						result.message,
+						`attempts: ${result.progress.attempts}`,
+						`tried: ${result.progress.tried.at(-1) ?? "<none>"}`,
+						`blocker: ${result.progress.blocker.at(-1) ?? "<none>"}`,
+						`next: ${result.progress.next.at(-1) ?? "<none>"}`,
+					].join("\n")
+				: result.message;
+			return { content: textContent(content), details: result };
 		},
 	};
 
@@ -579,7 +588,7 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 		};
 	});
 
-	pi.on("context", async (event, ctx) => {
+	pi.on("before_agent_start", async (_event, ctx) => {
 		const state = await ensureRun(ctx);
 		if (run && ownership) run = syncRunPaths(run, state.git, ownership.owned());
 		const snapshot: ContextSnapshot = {
@@ -592,21 +601,12 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 			planPath: "plan.md",
 			progressPath: "progress.md",
 		};
-		const filtered = event.messages.filter((message) => {
-			const candidate = message as { customType?: string };
-			return candidate.customType !== DYNAMIC_CONTEXT_TYPE;
-		});
 		return {
-			messages: [
-				...filtered,
-				{
-					role: "custom",
-					customType: DYNAMIC_CONTEXT_TYPE,
-					content: buildDynamicContext(snapshot),
-					display: false,
-					timestamp: Date.now(),
-				},
-			],
+			message: {
+				customType: DYNAMIC_CONTEXT_TYPE,
+				content: buildDynamicContext(snapshot),
+				display: false,
+			},
 		};
 	});
 

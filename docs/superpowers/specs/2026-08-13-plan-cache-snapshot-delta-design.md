@@ -38,7 +38,7 @@ Compaction summary / conversation history
 Conversation and tool messages
 [Plan Updates Since Cached Snapshot] immutable, persistent, zero or more
 Conversation and tool messages
-[Long-Horizon Dynamic State]         temporary, rebuilt per LLM call
+[Long-Horizon Query Snapshot]       immutable for one user query
 ```
 
 Snapshot 和已经写入 session 的 Update 不允许被原地修改。新的变化只追加新消息，从而保持已有 prompt prefix 不变。
@@ -260,9 +260,9 @@ section `source` 从 `###` heading 开始，到下一个 `###` section 或 `##` 
 
 旧 Snapshot/Updates 若因 keep-recent 策略仍位于 compaction 后保留区，也会被新 Snapshot 整体覆盖，不影响语义。
 
-## 10. 临时 Dynamic Context
+## 10. Query Snapshot
 
-当前 `[Long-Horizon Dynamic State]` 保留：
+当前 `[Long-Horizon Query Snapshot]` 保留：
 
 - mode；
 - active、attempts、done、blocker、tried、next；
@@ -271,7 +271,7 @@ section `source` 从 `###` heading 开始，到下一个 `###` section 或 `##` 
 - owned/unowned；
 - recovery hints。
 
-它不再重复 plan working set。为避免模型遗漏覆盖规则，稳定 protocol 增加：
+它在每个用户 query 的 `before_agent_start` 阶段只生成一次，后续 LLM 调用不通过 `context` hook 删除、移动或重建；工具结果负责传递 query 内状态变化。它不再重复 plan working set。为避免模型遗漏覆盖规则，稳定 protocol 增加：
 
 ```text
 Plan Cached Snapshot is the baseline. For the same section ID, the latest Plan Update wins. A deleted tombstone removes all earlier versions.
@@ -282,7 +282,7 @@ Plan Cached Snapshot is the baseline. For the same section ID, the latest Plan U
 - duplicate section ID 或 Git conflict marker 仍是 plan hard error；不生成增量，不推进 section。
 - 缺失显式 ID 仍先 materialize，再建立 Snapshot/Update，避免基于临时 slug 的覆盖链。
 - 持久消息追加失败时，不更新 observed manifest；下一次生命周期检查会重试同一 delta。
-- 磁盘读取或解析失败时保留上一个有效 observed manifest，并在 temporary dynamic context 中报告错误。
+- 磁盘读取或解析失败时保留上一个有效 observed manifest，并在当前 Query Snapshot 中报告错误。
 - Snapshot/Update 不是 Git ownership，不自动进入 section commit；canonical 变化仍由真实 `plan.md` 的 ownership 规则决定。
 - 插件不根据来源或文件 mtime 判断变化，只信任解析后的原文 hash。
 
@@ -337,6 +337,6 @@ Pi adapter 测试覆盖：
 - session resume 从 message details 恢复且不重复发送；
 - compaction 成功后追加新 Snapshot，失败或取消时不重置；
 - tombstone 和 structure update 的真实消息格式；
-- temporary dynamic context 不再重复 plan working set。
+- Query Snapshot 不再重复 plan working set，query 内状态变化通过工具结果传递。
 
 Pi package/RPC smoke test继续确认插件通过独立 package manifest 加载，不修改 Pi 本体。

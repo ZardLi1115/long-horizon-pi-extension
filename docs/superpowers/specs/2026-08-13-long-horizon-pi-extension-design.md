@@ -6,7 +6,7 @@
 
 ## 1. 目标与边界
 
-这个 Extension 为 Pi Coding Agent 增加长周期项目执行协议：每次模型调用前从磁盘重新读取 canonical plan/progress/Git 状态，把动态状态临时注入 context；section 完成由自定义工具触发验证、状态更新和 Git 提交；compaction 只保存当前继续推理需要的工作记忆。
+这个 Extension 为 Pi Coding Agent 增加长周期项目执行协议：每个用户 query 开始时从磁盘读取一次 canonical plan/progress/Git 状态，生成不可变的 Query Snapshot；section 完成由自定义工具触发验证、状态更新和 Git 提交；compaction 只保存当前继续推理需要的工作记忆。
 
 实现不 fork `pi-agent-core`，不修改 Homebrew 安装包。插件源码独立维护，开发验证使用 `pi -e`，稳定后再链接到 `~/.pi/agent/extensions/`。
 
@@ -118,16 +118,16 @@ pi.appendEntry("long-horizon/mode", { mode: "single" | "multi" });
 - `plan.md` 含 Git conflict marker：拒绝正常解析，注入冲突片段和修复提示。
 - `plan.md` 不存在或没有 section：进入 bootstrap context；`complete_section` 返回错误。
 
-### 4.3 动态 context
+### 4.3 Query Snapshot
 
-`context` hook 在每次 LLM 调用前读取最新：
+`before_agent_start` 在每个用户 query 开始时读取一次：
 
 - plan context：小计划完整注入；大计划注入 chapter index、active section 前后邻居和 `needs` 一跳依赖；不做模型摘要。
 - progress：active、done、attempts、blocker、tried、next。
 - Git：HEAD、当前工作区状态、Run owned/unowned paths、plan 是否变化。
 - hints：bootstrap、重复 ID、active 缺失、验证失败、stuck attempts、single/multi 规则。
 
-动态块作为隐藏 custom message 返回，不永久追加到 session history。稳定协议通过 `before_agent_start` 的 system prompt 追加一次性规则：plan 是 roadmap，progress 是 pointer，Git 是代码历史，完成必须调用 section 工具。
+Query Snapshot 作为隐藏 custom message 返回，并由 Pi 持久化到当前 session；同一个 query 的后续 LLM 调用不删除、不移动、不重建它。工具执行和 `complete_section` 的边界检查重新读取 canonical 状态，工具结果负责告知模型 query 内的状态变化。稳定协议通过 `before_agent_start` 的 system prompt 追加一次性规则：plan 是 roadmap，progress 是 pointer，Git 是代码历史，完成必须调用 section 工具。
 
 每次 Run 开始时 harness 不修改 attempts。只有模型在真实尝试失败或放弃具体方案后调用 `record_attempt_failure`，才递增 attempts 并写入 tried、blocker、next；切换 active 时由 `advanceProgress` 将 attempts 重置为 0。
 
@@ -283,7 +283,7 @@ plan_source: plan.md
 ### 验收标准
 
 1. 不修改 Pi Homebrew 安装包即可加载插件。
-2. 每次 LLM 调用都能看到当前磁盘 plan/progress/Git 状态。
+2. 每个用户 query 开始时能看到当时的磁盘 plan/progress/Git 状态，后续 correctness 检查仍读取实时状态。
 3. single/multi 行为与本设计一致。
 4. 验证失败不会错误推进或提交。
 5. 用户已有脏改动和 bash 副作用不会被自动提交。

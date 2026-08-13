@@ -210,10 +210,11 @@ export async function completeSection(input: CompleteSectionInput): Promise<Sect
 	}
 	if (input.run.mode === "single") input.abort();
 	const noChangesMessage = selection.paths.length === 0 ? "; no changes to commit" : "";
+	const nextActiveMessage = `; next active: ${nextProgress.active ?? "<none>"}`;
 	return {
 		ok: true,
 		status,
-		message: `${input.id} completed${status === "unverified" ? " without verification" : ""}${noChangesMessage}`,
+		message: `${input.id} completed${status === "unverified" ? " without verification" : ""}${nextActiveMessage}${noChangesMessage}`,
 		progress: nextProgress,
 		run: nextRun,
 		commitPaths: selection.paths,
