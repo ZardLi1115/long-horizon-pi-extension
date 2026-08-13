@@ -9,8 +9,8 @@ Pi is the first host adapter. The planning, progress, Run, ownership, and Git tr
 - Reloads `plan.md`, `progress.md`, and Git state before model calls.
 - Defaults to one active section per user query (`single`).
 - Supports persistent `/lh multi` mode for completing several sections in one query while committing each section separately.
-- Tracks write/edit/delete/move ownership and excludes pre-existing or bash-created changes from automatic commits.
-- Provides `complete_section`, `reopen_section`, `long_horizon_delete`, and `long_horizon_move` tools.
+- Tracks write/edit/delete/move ownership; only files explicitly owned by the run or touched by the runtime are selected for automatic commits.
+- Provides `complete_section`, `record_attempt_failure`, `reopen_section`, `long_horizon_delete`, and `long_horizon_move` tools.
 - Uses Pi's native model summarization for compaction, then appends only Long Horizon execution state.
 - Caches the full `plan.md` as a hidden persistent snapshot and appends only changed sections between compactions.
 
@@ -19,6 +19,8 @@ Pi is the first host adapter. The planning, progress, Run, ownership, and Git tr
 - Node.js 20.6 or newer
 - Pi Coding Agent 0.73.1 or newer
 - A Git repository for automatic section commits
+
+The extension uses Node.js filesystem and child-process APIs directly. It does not require `python3` or the `env` executable. String verification commands run through the user's shell (`$SHELL` on Unix-like systems and `ComSpec` on Windows), rather than a hard-coded `sh -lc` invocation. File operations validate every path component and use no-follow final-leaf opens where the host supports them. Node does not expose the previous descriptor-relative `openat` flow, so this is not a guarantee against a hostile concurrent parent-directory swap.
 
 ## Install
 
@@ -74,6 +76,8 @@ Example `plan.md`:
 <!-- needs: auth -->
 ```
 
+`section.verify` is used automatically when `complete_section` does not provide a different `verify`. To complete without running a configured verification command, pass `skipVerify: true`; `verify` and `skipVerify` cannot be used together.
+
 Example `progress.md`:
 
 ```yaml
@@ -99,6 +103,19 @@ next:
 
 `single` is the default. Mode changes are stored in the Pi session as extension data; they do not change Pi's global configuration.
 
+`attempts` counts model-declared concrete failures, not agent turns. Call `record_attempt_failure` only after a concrete attempt failed or a concrete approach was abandoned:
+
+```text
+record_attempt_failure(
+  id: "auth",
+  tried: "rotated the refresh token before persistence",
+  blocker: "the replay test still accepts the old token",
+  next: "inspect the persistence transaction"
+)
+```
+
+Verification failure returns its output to the model but does not increment `attempts` or write `progress.md` by itself.
+
 ## Plan cache behavior
 
 At the beginning of a cache generation, the extension adds the complete `plan.md` as a hidden session message. When the file changes, it compares the current bytes with the last observed manifest and appends the complete latest source for each changed section. The latest occurrence of a section ID wins.
@@ -106,6 +123,8 @@ At the beginning of a cache generation, the extension adds the complete `plan.md
 Deleted sections are represented by tombstones. Changes to chapter text, section order, or other text outside sections append a `__plan-structure__` snapshot. Human edits, agent tools, bash, scripts, and external editors are handled identically because the extension diffs the canonical file on disk.
 
 After a successful Pi compaction, a new full snapshot and generation ID are appended. Failed or cancelled compaction does not reset the existing generation. Progress, Git, ownership, and recovery hints remain in the temporary dynamic context tail, so they do not repeatedly expand the stable plan prefix.
+
+Ownership is recorded only after a successful `write`, `edit`, `delete`, or `move`. The extension also stores the resulting content state and refuses section completion if an owned file was changed later by a formatter, verification command, shell command, or another external process. Dirty paths left at a section boundary are reported as unowned until the next run explicitly owns them. The current version intentionally does not protect user edits that overlap a path the agent or runtime owns; hunk-level ownership is a later improvement.
 
 ## Development
 

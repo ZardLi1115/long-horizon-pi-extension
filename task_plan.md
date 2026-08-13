@@ -19,16 +19,17 @@
 
 ## 当前阶段
 
-实现完成并进入发布前验证；当前分支已包含 plan snapshot/delta cache、tombstone、structure update、session resume 与 compaction generation。
+执行已确认的 runtime 简化修复：将 attempts 改为模型主动记账，移除 pre-existing dirty baseline，避免 progress.md 自锁，同时保留前一轮已完成的跨平台、verify 默认继承、ownership snapshot 和 plan cache 修复。
 
 ## 实现结果
 
 - `index.ts` 注册动态 context、Run 生命周期、compaction、`complete_section`、`reopen_section`、delete/move 和 `/lh`。
 - `src/plan.ts` 解析 section、依赖和元数据，并为缺失 ID 做稳定 slug materialize。
 - `src/progress.ts` 维护 bounded progress 状态和未知字段保留。
-- `src/git.ts` 只选择本 Run owned 且非 pre-existing 的路径提交。
+- `src/git.ts` 只选择本 Run owned 与 runtime touched 且当前 changed 的路径提交，不再维护 pre-existing dirty baseline。
 - `src/ownership.ts` 只在 write/edit 成功后确认 ownership；bash 副作用保留为 unowned。
 - single 为默认模式；multi 通过 `/lh multi` 持续到 `/lh single`。
+- `record_attempt_failure` 是唯一的 attempts 递增入口；普通 agent turn 和 verify failure 不递增。
 - single completion 的 abort 延迟到工具结果返回之后；Pi 工具结果同时返回 `terminate: true`。
 - plan cache 在 generation 开始时追加完整 hidden snapshot；query/turn/agent_end 只追加最新 section、删除 tombstone 或 `__plan-structure__`。
 - session resume 从 hidden custom message details 恢复完整 manifest；成功 compaction 后追加新的 generation snapshot。
@@ -55,7 +56,7 @@
 - `/lh multi` 持续到 `/lh single`
 - single：一次 query 一个 section，完成后结束当前 agent loop
 - multi：一次 query 可连续完成多个 section，每个 section 独立验证和提交
-- verify 命令由 `complete_section` 显式传入，可不传
+- `complete_section.verify` 优先于 section 元数据中的 `verify`；未配置任何 verify 时必须显式传 `skipVerify: true`
 - 未调用 `complete_section` 的请求保留脏改动，并在结束时报告
 - plan/progress 默认只读取当前 cwd
 - v1 要求当前 cwd 已经是 Git 仓库，不自动初始化 Git
@@ -65,3 +66,12 @@
 | 错误 | 次数 | 处理 |
 |---|---:|---|
 | 默认模式下无法调用 `request_user_input` | 多次 | 改用普通对话确认，未影响设计推进 |
+
+## 本轮修复计划
+
+- [ ] 先写四类回归测试并确认当前实现失败
+- [ ] 将 safe-fs、verify 和 Git 临时 index 改为 Node 子进程/文件 API
+- [ ] 实现 section.verify 默认继承与显式 skipVerify
+- [x] 为 multi section 清除残留 dirty baseline，并记录 owned 文件内容快照
+- [ ] 保留原始换行，识别 metadata block，忽略 fenced code 中的 Markdown heading
+- [ ] 完整验证后合并 `main` 并同步自动发现插件

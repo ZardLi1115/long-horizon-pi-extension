@@ -45,6 +45,76 @@ describe("plan parser", () => {
 		expect(result.source).toBe("### Refresh Token Flow\n\n<!-- id: refresh-token-flow -->\nbody");
 	});
 
+	it("scans the complete metadata block before materializing an id and preserves mixed line endings", () => {
+		const source =
+			"### First\r\n" +
+			"<!-- needs: dependency -->\n" +
+			"\r\n" +
+			"<!-- brief: first section -->\r\n" +
+			"<!-- section-id: first -->\n" +
+			"body\r\n" +
+			"### Second\n" +
+			"<!-- verify: npm test -->\r\n" +
+			"body\n";
+
+		const result = materializeMissingIds(source);
+
+		expect(result.changed).toBe(true);
+		expect(result.source).toBe(
+			"### First\r\n" +
+			"<!-- needs: dependency -->\n" +
+			"\r\n" +
+			"<!-- brief: first section -->\r\n" +
+			"<!-- section-id: first -->\n" +
+			"body\r\n" +
+			"### Second\n" +
+			"<!-- id: second -->\n" +
+			"<!-- verify: npm test -->\r\n" +
+			"body\n",
+		);
+	});
+
+	it("ignores headings and metadata inside backtick and tilde fences", () => {
+		const plan = parsePlan(
+			[
+				"### Real",
+				"```markdown",
+				"## Fake Chapter",
+				"### Fake Section",
+				"<!-- id: fake -->",
+				"```",
+				"~~~markdown",
+				"### Another Fake Section",
+				"<!-- id: another-fake -->",
+				"~~~",
+				"<!-- id: real -->",
+				"body",
+			].join("\n"),
+		);
+
+		expect(plan.sections).toHaveLength(1);
+		expect(plan.sections[0]).toMatchObject({ id: "real", title: "Real", generatedId: false });
+	});
+
+	it("ignores Git conflict-looking text inside fenced examples", () => {
+		const plan = parsePlan(
+			[
+				"### Real",
+				"```diff",
+				"<<<<<<< HEAD",
+				"old example",
+				"=======",
+				"new example",
+				">>>>>>> branch",
+				"```",
+				"<!-- id: real -->",
+			].join("\n"),
+		);
+
+		expect(plan.sections).toHaveLength(1);
+		expect(plan.sections[0].id).toBe("real");
+	});
+
 	it("rejects duplicate ids and conflict markers", () => {
 		expect(() => parsePlan("### One\n<!-- id: same -->\n### Two\n<!-- id: same -->")).toThrow(
 		new PlanError("duplicate section id: same"),

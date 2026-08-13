@@ -47,4 +47,46 @@ describe("ownership tracker", () => {
 			pending: [],
 		});
 	});
+
+	it("detects an owned file changed after a successful tool result", async () => {
+		const tracker = new OwnershipTracker("/tmp/project");
+		tracker.pending("call-1", "write", "src/file.ts");
+		tracker.result("call-1", false, "before");
+
+		expect(await tracker.validate(async () => "after")).toEqual(["src/file.ts"]);
+		expect(await tracker.validate(async () => "before")).toEqual([]);
+	});
+
+	it("blocks a later acquisition after an external change instead of re-baselining it", () => {
+		const tracker = new OwnershipTracker("/tmp/project");
+		tracker.pending("call-1", "write", "src/file.ts");
+		tracker.result("call-1", false, "agent-version-1");
+
+		expect(() => tracker.assertCanAcquire("src/file.ts", "external-version")).toThrow(
+		/owned path changed outside Long Horizon tools/,
+		);
+		expect(() => tracker.assertCanAcquire("src/file.ts", "agent-version-1")).not.toThrow();
+	});
+
+	it("records expected states for delete and move operations", async () => {
+		const tracker = new OwnershipTracker("/tmp/project");
+		tracker.customSuccess(
+			"delete",
+			["deleted.ts"],
+			new Map<string, string | null>([["deleted.ts", null]]),
+		);
+		tracker.customSuccess(
+			"move",
+			["old.ts", "new.ts"],
+			new Map<string, string | null>([
+				["old.ts", null],
+				["new.ts", "new-content"],
+			]),
+		);
+
+		expect(await tracker.validate(async (filePath) => {
+			if (filePath === "new.ts") return "new-content";
+			return null;
+		})).toEqual([]);
+	});
 });

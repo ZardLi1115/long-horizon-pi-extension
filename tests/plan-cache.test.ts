@@ -74,6 +74,28 @@ describe("plan cache document", () => {
 			"## First Chapter\n\n<!-- section: a -->\n## Second Chapter\nchapter text\n\n<!-- section: b -->\n",
 		);
 	});
+
+	it("ignores fenced headings and metadata when building the cache structure", () => {
+		const source =
+			"# Plan\n\n" +
+			"### Real\n" +
+			"```markdown\n" +
+			"## Fake Chapter\n" +
+			"### Fake Section\n" +
+			"<!-- id: fake -->\n" +
+			"```\n" +
+			"~~~markdown\n" +
+			"### Another Fake Section\n" +
+			"<!-- id: another-fake -->\n" +
+			"~~~\n" +
+			"<!-- id: real -->\n" +
+			"body\n";
+		const document = parsePlanCacheDocument(source);
+
+		expect(document.order).toEqual(["real"]);
+		expect(document.sections.get("real")?.source).toBe(source.slice(source.indexOf("### Real")));
+		expect(document.structureSource).toBe("# Plan\n\n<!-- section: real -->\n");
+	});
 });
 
 describe("plan cache diff", () => {

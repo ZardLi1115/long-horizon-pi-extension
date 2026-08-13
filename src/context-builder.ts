@@ -6,6 +6,7 @@ export function buildStableProtocol(): string {
 		"Canonical state lives in plan.md, progress.md, and Git.",
 		"Read the dynamic state supplied before each model call; do not invent a different active section.",
 		"Use complete_section for a verified or explicitly unverified section completion.",
+		"Only call record_attempt_failure after a concrete attempt has failed or a concrete approach has been abandoned; ordinary agent turns and verification failures do not increment attempts automatically.",
 		"Use reopen_section when a completed section must be revisited.",
 		"The default mode is single: one user query is locked to one active section and completion ends that agent loop.",
 		"multi mode allows one query to continue into later sections, while each section still commits independently.",

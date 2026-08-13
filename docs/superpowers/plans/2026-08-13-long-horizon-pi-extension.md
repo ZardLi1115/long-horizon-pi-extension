@@ -71,7 +71,7 @@ Use Pi's installed package for runtime types and TypeBox for tool schemas:
 
 - [ ] **Step 2: Add the domain types before implementation**
 
-Define these exact interfaces/unions in `src/types.ts`: `Mode = "single" | "multi"`; `PlanSection` with `id`, `title`, `heading`, `chapter`, `needs`, optional `verify`/`brief`, `startLine`, `endLine`; `PlanDocument` with `sections`, `byId`, `chapters`, `missingIds`, `duplicateIds`, `conflictLines`; `ProgressState` with `active`, `attempts`, `done`, `blocker`, `tried`, `next`, `unknown`; `GitState` with `available`, `head`, `dirtyPaths`, `stagedPaths`, `conflictPaths`; `RunState` with mode, sectionId, baseHead, preexistingDirtyPaths, pendingPaths, ownedPaths, unownedPaths, completedSections, completed; and `ContextSnapshot`.
+Define these exact interfaces/unions in `src/types.ts`: `Mode = "single" | "multi"`; `PlanSection` with `id`, `title`, `heading`, `chapter`, `needs`, optional `verify`/`brief`, `startLine`, `endLine`; `PlanDocument` with `sections`, `byId`, `chapters`, `missingIds`, `duplicateIds`, `conflictLines`; `ProgressState` with `active`, `attempts`, `done`, `blocker`, `tried`, `next`, `unknown`; `GitState` with `available`, `head`, `dirtyPaths`, `stagedPaths`, `conflictPaths`; `RunState` with mode, sectionId, baseHead, pendingPaths, ownedPaths, unownedPaths, completedSections, completed; and `ContextSnapshot`.
 
 - [ ] **Step 3: Run the type checker**
 
@@ -104,7 +104,7 @@ Run `npm test -- tests/plan.test.ts`; expected: all plan tests pass.
 
 - [ ] **Step 5: Write failing progress tests**
 
-Cover an empty/default state, canonical YAML-like round trip, unknown-field preservation, attempts increment/reset, active advancement to the next unfinished section, and reopen moving an ID from `done` to `active` with a reason.
+Cover an empty/default state, canonical YAML-like round trip, unknown-field preservation, explicit attempt recording/reset, active advancement to the next unfinished section, and reopen moving an ID from `done` to `active` with a reason.
 
 - [ ] **Step 6: Run progress tests red**
 
@@ -112,7 +112,7 @@ Run `npm test -- tests/progress.test.ts`; expected: FAIL because the state funct
 
 - [ ] **Step 7: Implement bounded progress parsing and transitions**
 
-Support scalar `active`/`attempts`, list fields `done`/`blocker`/`tried`/`next`, and preserve unknown top-level lines under `unknown`. Serialize known fields in the canonical order shown in the design document. Implement `advanceProgress`, `incrementAttempt`, and `reopenProgress` without mutating inputs.
+Support scalar `active`/`attempts`, list fields `done`/`blocker`/`tried`/`next`, and preserve unknown top-level lines under `unknown`. Serialize known fields in the canonical order shown in the design document. Implement `advanceProgress` and `reopenProgress` without mutating inputs; attempt increments belong to the explicit `record_attempt_failure` operation.
 
 - [ ] **Step 8: Run progress tests to green and typecheck**
 
@@ -142,7 +142,7 @@ Normalize all paths relative to cwd, reject paths outside cwd, retain pending by
 
 - [ ] **Step 4: Write failing Git tests**
 
-Use a fake Git adapter to verify unavailable repositories are reported, pre-existing dirty/staged paths are excluded, unowned changes are not selected for commits, plugin-updated `plan.md`/`progress.md` are included, and conflict paths block completion.
+Use a fake Git adapter to verify unavailable repositories are reported, unowned changes are not selected for commits, owned/runtime-touched paths are included even when already dirty, plugin-updated `plan.md`/`progress.md` are included, and conflict paths block completion.
 
 - [ ] **Step 5: Run Git tests red**
 
@@ -150,11 +150,11 @@ Run `npm test -- tests/git.test.ts`; expected: FAIL because `src/git.ts` is abse
 
 - [ ] **Step 6: Implement Git adapter and commit selection**
 
-Define `GitAdapter` methods around `pi.exec` (`rev-parse`, `status --porcelain=v1`, `diff`, `add`, `commit`). Parse porcelain output conservatively. `selectCommitPaths` must return only owned paths that differ from the run baseline plus explicitly plugin-touched canonical files, and return a boundary error if a path was pre-existing dirty/staged or if conflict markers remain.
+Define `GitAdapter` methods around `pi.exec` (`rev-parse`, `status --porcelain=v1`, `diff`, `add`, `commit`). Parse porcelain output conservatively. `selectCommitPaths` must return only owned paths and explicitly plugin-touched canonical files that are currently changed, and return an error if conflict markers remain. The v1 design intentionally does not maintain a pre-existing dirty baseline; overlapping user and agent edits may be committed together.
 
 - [ ] **Step 7: Write failing run-state tests**
 
-Verify `startRun` locks `progress.active`, initializes attempts based on whether active changed, single rejects a different completion ID, multi accepts the next active section after a successful completion, and completed sections are tracked.
+Verify `startRun` locks `progress.active` without changing attempts, single rejects a different completion ID, multi accepts the next active section after a successful completion, and completed sections are tracked.
 
 - [ ] **Step 8: Run run-state tests red, implement, then run green**
 
@@ -182,7 +182,7 @@ Provide `buildStableProtocol()` and `buildDynamicContext(snapshot)`. Keep dynami
 
 - [ ] **Step 4: Write failing section-operation tests**
 
-With injected filesystem, command, Git, and abort adapters, verify: a successful verify updates progress and selects a commit; a non-zero verify preserves active, increments attempts, truncates blocker output, and does not commit; missing verify is marked unverified; single schedules abort; multi does not; invalid section IDs and cross-section completion are rejected.
+With injected filesystem, command, Git, and abort adapters, verify: a successful verify updates progress and selects a commit; a non-zero verify preserves active without incrementing attempts or persisting progress; `record_attempt_failure` explicitly records attempts and execution memory; missing verify is marked unverified; single schedules abort; multi does not; invalid section IDs and cross-section completion are rejected.
 
 - [ ] **Step 5: Run section tests red**
 

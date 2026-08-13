@@ -1,22 +1,40 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import longHorizonExtension from "../index.js";
 import { createSnapshotDetails, parsePlanCacheDocument } from "../src/plan-cache.js";
+
+const commandMocks = vi.hoisted(() => ({
+	runCommand: vi.fn(async (_executable: string, args: string[]) => {
+		if (args[0] === "write-tree") return { stdout: "tree-new\n", stderr: "", code: 0, killed: false };
+		if (args[0] === "commit-tree") return { stdout: "def\n", stderr: "", code: 0, killed: false };
+		return { stdout: "", stderr: "", code: 0, killed: false };
+	}),
+	runShellCommand: vi.fn(async () => ({ stdout: "", stderr: "", code: 0, killed: false })),
+}));
+
+vi.mock("../src/command.js", () => commandMocks);
+
+beforeEach(() => {
+	vi.clearAllMocks();
+});
 
 async function createPlanCacheFixture(planSource: string, entries: unknown[] = []) {
 	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "long-horizon-plan-cache-"));
 	await fs.writeFile(path.join(cwd, "plan.md"), planSource);
 	await fs.writeFile(path.join(cwd, "progress.md"), "active: one\nattempts: 0\n");
 	const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
+	const tools = new Map<string, any>();
 	const sent: Array<{ message: any; options: any }> = [];
 	const pi = {
 		on(event: string, handler: (event: any, ctx: any) => unknown) {
 			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
 		},
-		registerTool() {},
+		registerTool(tool: any) {
+			tools.set(tool.name, tool);
+		},
 		registerCommand() {},
 		appendEntry() {},
 		sendMessage(message: any, options: any) {
@@ -38,10 +56,98 @@ async function createPlanCacheFixture(planSource: string, entries: unknown[] = [
 		abort: vi.fn(),
 	} as unknown as ExtensionContext;
 	await handlers.get("session_start")?.[0]?.({ reason: "startup" }, ctx);
-	return { cwd, handlers, sent, ctx, pi };
+	return { cwd, handlers, sent, tools, ctx, pi };
 }
 
 describe("Pi extension wiring", () => {
+	it("does not increase attempts when agent turns start", async () => {
+		const fixture = await createPlanCacheFixture("### One\n<!-- id: one -->\n");
+
+		await fixture.handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "base" }, fixture.ctx);
+		await fixture.handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "base" }, fixture.ctx);
+
+		expect(await fs.readFile(path.join(fixture.cwd, "progress.md"), "utf8")).toContain("attempts: 0");
+	});
+
+	it("registers record_attempt_failure and persists only model-declared failures", async () => {
+		const fixture = await createPlanCacheFixture("### One\n<!-- id: one -->\n");
+
+		await fixture.handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "base" }, fixture.ctx);
+		const result = await fixture.tools.get("record_attempt_failure").execute(
+			"attempt-1",
+			{
+				id: "one",
+				tried: "focused test",
+				blocker: "assertion still fails",
+				next: "inspect fixture",
+			},
+			undefined,
+			undefined,
+			fixture.ctx,
+		);
+
+		expect(result.details.ok).toBe(true);
+		expect(result.details.progress.attempts).toBe(1);
+		expect(await fs.readFile(path.join(fixture.cwd, "progress.md"), "utf8")).toContain("attempts: 1");
+	});
+
+	it("commits progress after an earlier query left progress.md dirty", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "long-horizon-progress-boundary-"));
+		await fs.writeFile(path.join(cwd, "plan.md"), "### One\n<!-- id: one -->\n");
+		await fs.writeFile(path.join(cwd, "progress.md"), "active: one\nattempts: 0\n");
+		const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
+		const tools = new Map<string, any>();
+		let statusCalls = 0;
+		const pi = {
+			on(event: string, handler: (event: any, ctx: any) => unknown) {
+				handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+			},
+			registerTool(tool: any) {
+				tools.set(tool.name, tool);
+			},
+			registerCommand() {},
+			appendEntry() {},
+			async exec(command: string, args: string[]) {
+				if (command !== "git") return { stdout: "", stderr: "", code: 0, killed: false };
+				if (args[0] === "rev-parse" && args[1]?.endsWith("^{tree}")) return { stdout: "tree-base\n", stderr: "", code: 0, killed: false };
+				if (args[0] === "rev-parse") return { stdout: "abc\n", stderr: "", code: 0, killed: false };
+				if (args[0] === "status") {
+					statusCalls += 1;
+					return {
+						stdout: statusCalls < 2 ? "" : " M progress.md\0",
+						stderr: "",
+						code: 0,
+						killed: false,
+					};
+				}
+				return { stdout: "", stderr: "", code: 0, killed: false };
+			},
+		} as unknown as ExtensionAPI;
+		longHorizonExtension(pi);
+		const ctx = {
+			cwd,
+			hasUI: false,
+			ui: { notify: vi.fn(), setStatus: vi.fn(), setWidget: vi.fn() },
+			sessionManager: { getEntries: () => [] },
+			signal: undefined,
+			abort: vi.fn(),
+		} as unknown as ExtensionContext;
+
+		await handlers.get("session_start")?.[0]?.({ reason: "startup" }, ctx);
+		await handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "base" }, ctx);
+		await handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "base" }, ctx);
+		const result = await tools.get("complete_section").execute(
+			"complete-1",
+			{ id: "one", skipVerify: true },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(result.details.ok).toBe(true);
+		expect(result.details.status).toBe("unverified");
+	});
+
 	it("returns a hidden full plan snapshot before the first model call", async () => {
 		const fixture = await createPlanCacheFixture("### One\n<!-- id: one -->\nbody\n");
 
@@ -302,7 +408,7 @@ describe("Pi extension wiring", () => {
 		await expect(fs.readFile(outsideProgress, "utf8")).resolves.toBe("active: one\nattempts: 0\n");
 	});
 
-	it("does not implicitly execute plan metadata verify and commits successful owned edits", async () => {
+	it("requires an explicit skip to bypass plan metadata verification", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "long-horizon-pi-"));
 		await fs.writeFile(
 			path.join(cwd, "plan.md"),
@@ -329,13 +435,7 @@ describe("Pi extension wiring", () => {
 			appendEntry() {},
 			async exec(command: string, args: string[]) {
 				execCalls.push([command, ...args]);
-				if (command === "sh") throw new Error("implicit verify was executed");
-				if (command === "env") {
-					const gitArgs = args.slice(args.indexOf("git") + 1);
-					if (gitArgs[0] === "write-tree") return { stdout: "tree-new\n", stderr: "", code: 0, killed: false };
-					if (gitArgs[0] === "commit-tree") return { stdout: "def\n", stderr: "", code: 0, killed: false };
-					return { stdout: "", stderr: "", code: 0, killed: false };
-				}
+				if (command === "sh" || command === "env") throw new Error(`${command} must not be used by the extension`);
 				if (command !== "git") return { stdout: "", stderr: "", code: 0, killed: false };
 				if (args[0] === "rev-parse" && args[1]?.endsWith("^{tree}")) {
 					return { stdout: "tree-base\n", stderr: "", code: 0, killed: false };
@@ -373,14 +473,155 @@ describe("Pi extension wiring", () => {
 		expect(tools.get("long_horizon_delete").promptSnippet).toBe("Delete one file inside the current cwd");
 		expect(tools.get("long_horizon_move").promptSnippet).toBe("Move one file inside the current cwd");
 
-		const result = await tools.get("complete_section").execute("complete-1", { id: "one" }, undefined, undefined, ctx);
+		const result = await tools.get("complete_section").execute("complete-1", { id: "one", skipVerify: true }, undefined, undefined, ctx);
 
 		expect(result.details.status).toBe("unverified");
-		expect(execCalls.some(([command]) => command === "sh")).toBe(false);
-		expect(execCalls.some((call) => call[0] === "env" && call.includes("add") && call.includes("progress.md") && call.includes("src/file.ts"))).toBe(true);
-		expect(execCalls.some((call) => call[0] === "env" && call.includes("commit-tree") && call.includes("long-horizon: complete one"))).toBe(true);
+		expect(execCalls.some(([command]) => command === "sh" || command === "env")).toBe(false);
+		expect(commandMocks.runShellCommand).not.toHaveBeenCalled();
+		expect(commandMocks.runCommand.mock.calls.every(([executable]) => executable === "git")).toBe(true);
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(aborted).toBe(1);
+	});
+
+	it("executes section.verify through the command adapter by default", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "long-horizon-index-verify-default-"));
+		await fs.writeFile(path.join(cwd, "plan.md"), "### One\n<!-- id: one -->\n<!-- verify: printf verify-default -->\n");
+		await fs.writeFile(path.join(cwd, "progress.md"), "active: one\nattempts: 0\n");
+		const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
+		const tools = new Map<string, any>();
+		const pi = {
+			on(event: string, handler: (event: any, ctx: any) => unknown) {
+				handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+			},
+			registerTool(tool: any) {
+				tools.set(tool.name, tool);
+			},
+			registerCommand() {},
+			appendEntry() {},
+			async exec(command: string, args: string[]) {
+				if (command === "git" && args[0] === "rev-parse") return { stdout: "abc\n", stderr: "", code: 0, killed: false };
+				if (command === "git" && args[0] === "status") return { stdout: "", stderr: "", code: 0, killed: false };
+				return { stdout: "", stderr: "", code: 0, killed: false };
+			},
+		} as unknown as ExtensionAPI;
+		longHorizonExtension(pi);
+		const ctx = {
+			cwd,
+			hasUI: false,
+			ui: { notify: vi.fn(), setStatus: vi.fn(), setWidget: vi.fn() },
+			sessionManager: { getEntries: () => [] },
+			signal: undefined,
+			abort: vi.fn(),
+		} as unknown as ExtensionContext;
+
+		await handlers.get("session_start")?.[0]?.({ reason: "startup" }, ctx);
+		await handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "base" }, ctx);
+		const result = await tools.get("complete_section").execute("complete-1", { id: "one" }, undefined, undefined, ctx);
+
+		expect(result.details.status).toBe("verified");
+		expect(commandMocks.runShellCommand).toHaveBeenCalledWith(
+			"printf verify-default",
+			expect.objectContaining({ cwd, timeout: 15 * 60 * 1000 }),
+		);
+	});
+
+	it("rejects completion when an owned file changes after the tool result", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "long-horizon-index-owned-change-"));
+		await fs.writeFile(path.join(cwd, "plan.md"), "### One\n<!-- id: one -->\n");
+		await fs.writeFile(path.join(cwd, "progress.md"), "active: one\nattempts: 0\n");
+		await fs.mkdir(path.join(cwd, "src"));
+		await fs.writeFile(path.join(cwd, "src/file.ts"), "agent version\n");
+		const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
+		const tools = new Map<string, any>();
+		const pi = {
+			on(event: string, handler: (event: any, ctx: any) => unknown) {
+				handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+			},
+			registerTool(tool: any) {
+				tools.set(tool.name, tool);
+			},
+			registerCommand() {},
+			appendEntry() {},
+			async exec(command: string, args: string[]) {
+				if (command === "git" && args[0] === "rev-parse") return { stdout: "abc\n", stderr: "", code: 0, killed: false };
+				if (command === "git" && args[0] === "status") return { stdout: "", stderr: "", code: 0, killed: false };
+				return { stdout: "", stderr: "", code: 0, killed: false };
+			},
+		} as unknown as ExtensionAPI;
+		longHorizonExtension(pi);
+		const ctx = {
+			cwd,
+			hasUI: false,
+			ui: { notify: vi.fn(), setStatus: vi.fn(), setWidget: vi.fn() },
+			sessionManager: { getEntries: () => [] },
+			signal: undefined,
+			abort: vi.fn(),
+		} as unknown as ExtensionContext;
+
+		await handlers.get("session_start")?.[0]?.({ reason: "startup" }, ctx);
+		await handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "base" }, ctx);
+		await handlers.get("tool_call")?.[0]?.({ toolName: "write", toolCallId: "write-1", input: { path: "src/file.ts" } }, ctx);
+		await handlers.get("tool_result")?.[0]?.({ toolName: "write", toolCallId: "write-1", isError: false }, ctx);
+		await fs.writeFile(path.join(cwd, "src/file.ts"), "external version\n");
+
+		const blocked = await handlers.get("tool_call")?.[0]?.(
+			{ toolName: "write", toolCallId: "write-2", input: { path: "src/file.ts" } },
+			ctx,
+		);
+		expect(blocked).toMatchObject({ block: true, reason: expect.stringContaining("owned path changed outside") });
+
+		const result = await tools.get("complete_section").execute("complete-1", { id: "one", skipVerify: true }, undefined, undefined, ctx);
+
+		expect(result.details.status).toBe("commit_failed");
+		expect(result.details.message).toContain("src/file.ts");
+	});
+
+	it("rejects completion when verification changes an owned file", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "long-horizon-index-verify-change-"));
+		await fs.writeFile(path.join(cwd, "plan.md"), "### One\n<!-- id: one -->\n<!-- verify: mutate-owned -->\n");
+		await fs.writeFile(path.join(cwd, "progress.md"), "active: one\nattempts: 0\n");
+		await fs.mkdir(path.join(cwd, "src"));
+		await fs.writeFile(path.join(cwd, "src/file.ts"), "agent version\n");
+		const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
+		const tools = new Map<string, any>();
+		const pi = {
+			on(event: string, handler: (event: any, ctx: any) => unknown) {
+				handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+			},
+			registerTool(tool: any) {
+				tools.set(tool.name, tool);
+			},
+			registerCommand() {},
+			appendEntry() {},
+			async exec(command: string, args: string[]) {
+				if (command === "git" && args[0] === "rev-parse") return { stdout: "abc\n", stderr: "", code: 0, killed: false };
+				if (command === "git" && args[0] === "status") return { stdout: "", stderr: "", code: 0, killed: false };
+				return { stdout: "", stderr: "", code: 0, killed: false };
+			},
+		} as unknown as ExtensionAPI;
+		longHorizonExtension(pi);
+		const ctx = {
+			cwd,
+			hasUI: false,
+			ui: { notify: vi.fn(), setStatus: vi.fn(), setWidget: vi.fn() },
+			sessionManager: { getEntries: () => [] },
+			signal: undefined,
+			abort: vi.fn(),
+		} as unknown as ExtensionContext;
+
+		await handlers.get("session_start")?.[0]?.({ reason: "startup" }, ctx);
+		await handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "base" }, ctx);
+		await handlers.get("tool_call")?.[0]?.({ toolName: "write", toolCallId: "write-1", input: { path: "src/file.ts" } }, ctx);
+		await handlers.get("tool_result")?.[0]?.({ toolName: "write", toolCallId: "write-1", isError: false }, ctx);
+		(commandMocks.runShellCommand as any).mockImplementationOnce(async () => {
+			await fs.writeFile(path.join(cwd, "src/file.ts"), "verify version\n");
+			return { stdout: "", stderr: "", code: 0, killed: false };
+		});
+
+		const result = await tools.get("complete_section").execute("complete-1", { id: "one" }, undefined, undefined, ctx);
+
+		expect(result.details.status).toBe("commit_failed");
+		expect(result.details.message).toContain("src/file.ts");
 	});
 
 	it("defers single-mode abort until after the tool result is returned", async () => {
@@ -402,10 +643,6 @@ describe("Pi extension wiring", () => {
 			async exec(command: string, args: string[]) {
 				if (command === "git" && args[0] === "rev-parse") return { stdout: "abc\n", stderr: "", code: 0, killed: false };
 				if (command === "git" && args[0] === "status") return { stdout: "", stderr: "", code: 0, killed: false };
-				if (command === "env") {
-					const gitArgs = args.slice(args.indexOf("git") + 1);
-					if (gitArgs[0] === "write-tree") return { stdout: "abc-tree\n", stderr: "", code: 0, killed: false };
-				}
 				return { stdout: "", stderr: "", code: 0, killed: false };
 			},
 		} as unknown as ExtensionAPI;
@@ -422,7 +659,7 @@ describe("Pi extension wiring", () => {
 		} as unknown as ExtensionContext;
 		await handlers.get("session_start")?.[0]?.({ reason: "startup" }, ctx);
 		await handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "base" }, ctx);
-		const result = await tools.get("complete_section").execute("complete-1", { id: "one" }, undefined, undefined, ctx);
+		const result = await tools.get("complete_section").execute("complete-1", { id: "one", skipVerify: true }, undefined, undefined, ctx);
 		order.push("returned");
 		await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -733,7 +970,7 @@ describe("Pi extension wiring", () => {
 		await expect(fs.access(path.join(cwd, "to.txt"))).rejects.toThrow();
 	});
 
-	it("resets ownership after each successful section in multi mode", async () => {
+	it("resets ownership after each section and excludes leftover dirty paths from the next commit", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "long-horizon-multi-ownership-"));
 		await fs.writeFile(path.join(cwd, "plan.md"), "### One\n<!-- id: one -->\n### Two\n<!-- id: two -->\n");
 		await fs.writeFile(path.join(cwd, "progress.md"), "active: one\nattempts: 0\n");
@@ -780,12 +1017,26 @@ describe("Pi extension wiring", () => {
 		await handlers.get("tool_call")?.[0]?.({ toolName: "write", toolCallId: "write-1", input: { path: "owned.ts" } }, ctx);
 		await handlers.get("tool_result")?.[0]?.({ toolName: "write", toolCallId: "write-1", isError: false }, ctx);
 		status = " M owned.ts\0 M progress.md\0";
-		await tools.get("complete_section").execute("complete-1", { id: "one" }, undefined, undefined, ctx);
+		await tools.get("complete_section").execute("complete-1", { id: "one", skipVerify: true }, undefined, undefined, ctx);
 		status = " M owned.ts\0";
 
 		const contextResult = await handlers.get("context")?.[0]?.({ messages: [] }, ctx);
 		const dynamic = (contextResult as { messages: Array<{ content: string }> }).messages.at(-1)?.content ?? "";
+		expect(dynamic).toContain("run owned: <none>");
 		expect(dynamic).toContain("run unowned: owned.ts");
-		expect(dynamic).not.toContain("run owned: owned.ts");
+
+		await handlers.get("tool_call")?.[0]?.({ toolName: "write", toolCallId: "write-2", input: { path: "second.ts" } }, ctx);
+		await handlers.get("tool_result")?.[0]?.({ toolName: "write", toolCallId: "write-2", isError: false }, ctx);
+		status = " M owned.ts\0 M second.ts\0 M progress.md\0";
+		const secondResult = await tools.get("complete_section").execute(
+			"complete-2",
+			{ id: "two", skipVerify: true },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(secondResult.details.ok).toBe(true);
+		expect(secondResult.details.commitPaths).toEqual(["progress.md", "second.ts"]);
 	});
 });

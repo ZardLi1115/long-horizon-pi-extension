@@ -1,4 +1,4 @@
-import { advanceProgress, incrementAttempt, reopenProgress } from "./progress.js";
+import { advanceProgress, reopenProgress } from "./progress.js";
 import { canCompleteSection, completeRunSection } from "./run.js";
 import type { GitState, PlanDocument, ProgressState, RunState } from "./types.js";
 import type { CommitPathSelection } from "./git.js";
@@ -21,6 +21,7 @@ export interface SectionOperationResult {
 export interface CompleteSectionInput {
 	id: string;
 	verify?: string;
+	skipVerify?: boolean;
 	note?: string;
 	run: RunState;
 	plan: PlanDocument;
@@ -33,6 +34,7 @@ export interface CompleteSectionInput {
 	commit: (paths: string[], message: string) => Promise<void>;
 	abort: () => void;
 	pluginTouchedPaths?: string[];
+	validateOwnedPaths?: () => Promise<string[]>;
 }
 
 export interface ReopenSectionInput {
@@ -41,6 +43,21 @@ export interface ReopenSectionInput {
 	plan: PlanDocument;
 	progress: ProgressState;
 	persistProgress: (state: ProgressState) => Promise<void>;
+}
+
+export interface RecordAttemptFailureInput {
+	id: string;
+	tried: string;
+	blocker: string;
+	next: string;
+	progress: ProgressState;
+	persistProgress: (state: ProgressState) => Promise<void>;
+}
+
+export interface RecordAttemptFailureResult {
+	ok: boolean;
+	progress: ProgressState;
+	message: string;
 }
 
 const MAX_VERIFY_OUTPUT = 1200;
@@ -78,25 +95,58 @@ export async function completeSection(input: CompleteSectionInput): Promise<Sect
 		};
 	}
 
+	if (input.verify !== undefined && input.skipVerify !== undefined) {
+		return {
+			ok: false,
+			status: "rejected",
+			message: "verify and skipVerify cannot be used together",
+			progress: input.progress,
+			run: input.run,
+		};
+	}
+	const section = input.plan.byId.get(input.id);
+	if (!section) {
+		return { ok: false, status: "rejected", message: `unknown section id: ${input.id}`, progress: input.progress, run: input.run };
+	}
+	const effectiveVerify = input.skipVerify ? undefined : input.verify ?? section.verify;
+
 	let status: SectionOperationResult["status"] = "unverified";
-	if (input.verify) {
+	if (effectiveVerify?.trim()) {
 		if (!input.runVerify) {
 			return { ok: false, status: "rejected", message: "verify command adapter is unavailable", progress: input.progress, run: input.run };
 		}
-		const verification = await input.runVerify(input.verify);
+		const verification = await input.runVerify(effectiveVerify);
 		if (verification.code !== 0) {
 			const blocker = truncate([verification.stderr, verification.stdout].filter(Boolean).join("\n")) || `verify exited with code ${verification.code}`;
-			const failedProgress = incrementAttempt(input.progress, blocker);
-			await input.persistProgress(failedProgress);
 			return {
 				ok: false,
 				status: "verify_failed",
-				message: `verification failed for ${input.id}`,
-				progress: failedProgress,
+				message: `verification failed for ${input.id}: ${blocker}`,
+				progress: input.progress,
 				run: input.run,
 			};
 		}
 		status = "verified";
+	} else if (!input.skipVerify) {
+		return {
+			ok: false,
+			status: "rejected",
+			message: "no verify command is configured; pass skipVerify: true to complete without verification",
+			progress: input.progress,
+			run: input.run,
+		};
+	}
+	if (input.validateOwnedPaths) {
+		const changedOwnedPaths = await input.validateOwnedPaths();
+		if (changedOwnedPaths.length > 0) {
+			return {
+				ok: false,
+				status: "commit_failed",
+				message: `owned paths changed outside Long Horizon tools: ${changedOwnedPaths.join(", ")}`,
+				progress: input.progress,
+				run: input.run,
+			};
+		}
 	}
 
 	const boundaryGit = input.refreshGit ? await input.refreshGit() : input.git;
@@ -154,7 +204,6 @@ export async function completeSection(input: CompleteSectionInput): Promise<Sect
 		nextRun = {
 			...nextRun,
 			baseHead: committedGit.head,
-			preexistingDirtyPaths: [...input.run.preexistingDirtyPaths],
 			ownedPaths: new Set(),
 			unownedPaths: new Set(),
 		};
@@ -169,6 +218,27 @@ export async function completeSection(input: CompleteSectionInput): Promise<Sect
 		run: nextRun,
 		commitPaths: selection.paths,
 	};
+}
+
+export async function recordAttemptFailure(input: RecordAttemptFailureInput): Promise<RecordAttemptFailureResult> {
+	if (input.progress.active !== input.id) {
+		return {
+			ok: false,
+			progress: input.progress,
+			message: `section is not the active section: ${input.progress.active ?? "<none>"}`,
+		};
+	}
+	const progress: ProgressState = {
+		...input.progress,
+		attempts: input.progress.attempts + 1,
+		done: [...input.progress.done],
+		blocker: [input.blocker],
+		tried: [...input.progress.tried, input.tried],
+		next: [input.next],
+		unknown: [...input.progress.unknown],
+	};
+	await input.persistProgress(progress);
+	return { ok: true, progress, message: `recorded failed attempt for ${input.id}` };
 }
 
 export async function reopenSection(input: ReopenSectionInput): Promise<{ ok: boolean; progress: ProgressState; message: string }> {

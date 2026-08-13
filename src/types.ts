@@ -93,7 +93,6 @@ export interface RunState {
 	startedAt: string;
 	sectionId: string;
 	baseHead: string | null;
-	preexistingDirtyPaths: string[];
 	pendingPaths: Map<string, string>;
 	ownedPaths: Set<string>;
 	unownedPaths: Set<string>;

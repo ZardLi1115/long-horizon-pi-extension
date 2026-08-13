@@ -27,7 +27,6 @@ const run: RunState = {
 	startedAt: "2026-08-13T00:00:00.000Z",
 	sectionId: "active",
 	baseHead: "abc123",
-	preexistingDirtyPaths: [],
 	pendingPaths: new Map(),
 	ownedPaths: new Set(["src/owned.ts"]),
 	unownedPaths: new Set(["generated.txt"]),
@@ -67,6 +66,7 @@ describe("context builder", () => {
 		const stable = buildStableProtocol();
 
 		expect(stable).toContain("complete_section");
+		expect(stable).toContain("record_attempt_failure");
 		expect(stable).toContain("single");
 		expect(stable).toContain("multi");
 		expect(stable).toContain("plan.md");

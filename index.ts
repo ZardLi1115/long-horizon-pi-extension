@@ -24,8 +24,9 @@ import {
 } from "./src/plan-cache.js";
 import { materializeMissingIds, parsePlan } from "./src/plan.js";
 import { parseProgress, serializeProgress, withDefaultActive } from "./src/progress.js";
-import { completeSection, reopenSection } from "./src/section-tools.js";
-import { prepareProgressForRun, startRun, syncRunPaths } from "./src/run.js";
+import { completeSection, recordAttemptFailure, reopenSection } from "./src/section-tools.js";
+import { runCommand, runShellCommand } from "./src/command.js";
+import { startRun, syncRunPaths } from "./src/run.js";
 import {
 	safeAccessFile,
 	safeDeleteFile,
@@ -76,16 +77,15 @@ function makeGitAdapter(pi: ExtensionAPI, cwd: string): GitAdapter {
 			return { stdout: result.stdout, stderr: result.stderr, code: result.code };
 		},
 		async execWithEnv(args, env) {
-			const assignments = Object.entries(env).map(([key, value]) => `${key}=${value}`);
-			const result = await pi.exec("env", [...assignments, "git", ...args], { cwd });
+			const result = await runCommand("git", args, { cwd, env });
 			return { stdout: result.stdout, stderr: result.stderr, code: result.code };
 		},
 	};
 }
 
-async function readOptional(filePath: string): Promise<string> {
+async function readOptional(cwd: string, relativePath: string): Promise<string> {
 	try {
-		return await fs.readFile(filePath, "utf8");
+		return (await safeReadFile(cwd, relativePath)).toString("utf8");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
 		throw error;
@@ -96,8 +96,8 @@ async function loadState(pi: ExtensionAPI, cwd: string): Promise<LoadedState> {
 	const planPath = path.join(cwd, "plan.md");
 	const progressPath = path.join(cwd, "progress.md");
 	const [planSource, progressSource, git] = await Promise.all([
-		readOptional(planPath),
-		readOptional(progressPath),
+		readOptional(cwd, "plan.md"),
+		readOptional(cwd, "progress.md"),
 		readGitState(makeGitAdapter(pi, cwd)),
 	]);
 	const hints: string[] = [];
@@ -143,6 +143,19 @@ function statusText(mode: Mode, state: LoadedState, run: RunState | null): strin
 
 function hashFile(source: string): string {
 	return crypto.createHash("sha256").update(source).digest("hex");
+}
+
+function hashContent(source: string | Buffer): string {
+	return crypto.createHash("sha256").update(source).digest("hex");
+}
+
+async function readOwnedState(cwd: string, relativePath: string): Promise<string | null> {
+	try {
+		return hashContent(await safeReadFile(cwd, relativePath));
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw error;
+	}
 }
 
 interface PlanCacheEntryLike {
@@ -237,8 +250,7 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 
 	const readPlanCache = async (cwd: string): Promise<PlanCacheDocument | null> => {
 		try {
-			const planPath = path.join(cwd, "plan.md");
-			const source = await readOptional(planPath);
+			const source = await readOptional(cwd, "plan.md");
 			parsePlan(source);
 			const materialized = materializeMissingIds(source);
 			if (materialized.changed) {
@@ -325,35 +337,27 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 	};
 
 	const ensureRun = async (ctx: ExtensionContext, forceNewRun = false): Promise<LoadedState> => {
-		const previousRun = forceNewRun ? run : null;
 		if (forceNewRun) {
 			run = null;
 			ownership = new OwnershipTracker(ctx.cwd);
 			pluginTouchedPaths = new Set();
 		}
 		let state = await loadState(pi, ctx.cwd);
-		const initialPreexistingDirtyPaths = [...new Set([...state.git.dirtyPaths, ...state.git.stagedPaths])];
 		if (state.planPath && state.plan.sections.some((section) => section.generatedId)) {
-				const source = await readOptional(state.planPath);
-				const materialized = materializeMissingIds(source);
-				if (materialized.changed) {
-					await safeWriteFile(ctx.cwd, "plan.md", materialized.source);
-					pluginTouchedPaths.add("plan.md");
+			const source = await readOptional(ctx.cwd, "plan.md");
+			const materialized = materializeMissingIds(source);
+			if (materialized.changed) {
+				await safeWriteFile(ctx.cwd, "plan.md", materialized.source);
+				pluginTouchedPaths.add("plan.md");
 				state = await loadState(pi, ctx.cwd);
 			}
 		}
 		if (!state.progress.active) state.hints.push("progress.md has no active section; choose one before editing");
 		ownership ??= new OwnershipTracker(ctx.cwd);
 		if (forceNewRun && state.progress.active) {
-			const prepared = prepareProgressForRun(state.progress, previousRun);
-			if (prepared.progress.attempts !== state.progress.attempts) {
-					await safeWriteFile(ctx.cwd, "progress.md", serializeProgress(prepared.progress));
-				pluginTouchedPaths.add("progress.md");
-				state = { ...state, progress: prepared.progress };
-			}
-			run = startRun(mode, state.progress, state.git, previousRun, initialPreexistingDirtyPaths);
+			run = startRun(mode, state.progress, state.git);
 		} else if (!run && state.progress.active) {
-			run = startRun(mode, state.progress, state.git, null, initialPreexistingDirtyPaths);
+			run = startRun(mode, state.progress, state.git);
 		}
 		return state;
 	};
@@ -366,15 +370,16 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 	const completeTool = {
 		name: "complete_section",
 		label: "Complete section",
-		description: "Verify and complete the currently locked long-horizon plan section, then commit its owned changes.",
-		promptSnippet: "complete_section(id, verify?, note?)",
+		description: "Verify and complete the currently locked long-horizon plan section, then commit its owned and runtime-touched changes.",
+		promptSnippet: "complete_section(id, verify?, skipVerify?, note?)",
 		parameters: Type.Object({
 			id: Type.String(),
 			verify: Type.Optional(Type.String()),
+			skipVerify: Type.Optional(Type.Boolean()),
 			note: Type.Optional(Type.String()),
 		}),
 		executionMode: "sequential" as const,
-		async execute(_toolCallId: string, params: { id: string; verify?: string; note?: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
+		async execute(_toolCallId: string, params: { id: string; verify?: string; skipVerify?: boolean; note?: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			const state = await ensureRun(ctx);
 			if (!run || !ownership) throw new Error("long-horizon run is not initialized");
 			run = syncRunPaths(run, state.git, ownership.owned());
@@ -382,14 +387,19 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 			const result = await completeSection({
 				id: params.id,
 				verify: params.verify,
+				skipVerify: params.skipVerify,
 				note: params.note,
 				run,
 				plan: state.plan,
 				progress: state.progress,
 				git: state.git,
 				runVerify: async (command) => {
-					const result = await pi.exec("sh", ["-lc", command], { cwd: ctx.cwd, timeout: 15 * 60 * 1000, signal: ctx.signal });
+					const result = await runShellCommand(command, { cwd: ctx.cwd, timeout: 15 * 60 * 1000, signal: ctx.signal });
 					return { code: result.code, stdout: result.stdout, stderr: result.stderr };
+				},
+				validateOwnedPaths: () => {
+					if (!ownership) throw new Error("long-horizon ownership is not initialized");
+					return ownership.validate((relativePath) => readOwnedState(ctx.cwd, relativePath));
 				},
 				persistProgress: (next) => persistProgress(ctx, next),
 				refreshGit: async () => readGitState(makeGitAdapter(pi, ctx.cwd)),
@@ -407,6 +417,38 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 				if (!result.run.completed) ownership = new OwnershipTracker(ctx.cwd);
 			}
 			return { content: textContent(result.message), details: result, terminate: result.ok && runMode === "single" };
+		},
+	};
+
+	const recordAttemptFailureTool = {
+		name: "record_attempt_failure",
+		label: "Record failed attempt",
+		description: "Record one concrete approach that failed for the active section. Call only after a real attempt failed or was abandoned.",
+		promptSnippet: "record_attempt_failure(id, tried, blocker, next)",
+		parameters: Type.Object({
+			id: Type.String(),
+			tried: Type.String(),
+			blocker: Type.String(),
+			next: Type.String(),
+		}),
+		executionMode: "sequential" as const,
+		async execute(
+			_toolCallId: string,
+			params: { id: string; tried: string; blocker: string; next: string },
+			_signal: AbortSignal | undefined,
+			_onUpdate: unknown,
+			ctx: ExtensionContext,
+		) {
+			const state = await ensureRun(ctx);
+			const result = await recordAttemptFailure({
+				id: params.id,
+				tried: params.tried,
+				blocker: params.blocker,
+				next: params.next,
+				progress: state.progress,
+				persistProgress: (next) => persistProgress(ctx, next),
+			});
+			return { content: textContent(result.message), details: result };
 		},
 	};
 
@@ -428,8 +470,7 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 			});
 			if (result.ok) {
 				const runMode = run?.mode ?? mode;
-				const dirtyAtReopen = [...new Set([...state.git.dirtyPaths, ...state.git.stagedPaths])];
-				run = startRun(runMode, result.progress, state.git, run, dirtyAtReopen);
+				run = startRun(runMode, result.progress, state.git);
 				ownership = new OwnershipTracker(ctx.cwd);
 			}
 			return { content: textContent(result.message), details: result };
@@ -442,11 +483,12 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 		description: "Delete one file inside the current cwd and register it as owned by this run.",
 		promptSnippet: "Delete one file inside the current cwd",
 		parameters: Type.Object({ path: Type.String() }),
-		executionMode: "sequential" as const,
+		 executionMode: "sequential" as const,
 		async execute(_toolCallId: string, params: { path: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			const relative = safeRelativePath(ctx.cwd, params.path);
+			ownership?.assertCanAcquire(relative, await readOwnedState(ctx.cwd, relative));
 			await safeDeleteFile(ctx.cwd, relative);
-			ownership?.customSuccess("delete", [relative]);
+			ownership?.customSuccess("delete", [relative], new Map([[relative, null]]));
 			return { content: textContent(`deleted ${relative}`), details: { path: relative } };
 		},
 	};
@@ -461,8 +503,17 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 		async execute(_toolCallId: string, params: { from: string; to: string }, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
 			const from = safeRelativePath(ctx.cwd, params.from);
 			const to = safeRelativePath(ctx.cwd, params.to);
+			ownership?.assertCanAcquire(from, await readOwnedState(ctx.cwd, from));
+			ownership?.assertCanAcquire(to, await readOwnedState(ctx.cwd, to));
 			await safeMoveFile(ctx.cwd, from, to);
-			ownership?.customSuccess("move", [from, to]);
+			ownership?.customSuccess(
+				"move",
+				[from, to],
+				new Map([
+					[from, null],
+					[to, await readOwnedState(ctx.cwd, to)],
+				]),
+			);
 			return { content: textContent(`moved ${from} -> ${to}`), details: { from, to } };
 		},
 	};
@@ -470,6 +521,7 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 	pi.registerTool(safeWriteTool);
 	pi.registerTool(safeEditTool);
 	pi.registerTool(completeTool);
+	pi.registerTool(recordAttemptFailureTool);
 	pi.registerTool(reopenTool);
 	pi.registerTool(deleteTool);
 	pi.registerTool(moveTool);
@@ -565,6 +617,7 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 			if (typeof input.path === "string") {
 				try {
 					const relative = safeRelativePath(ctx.cwd, input.path);
+					ownership.assertCanAcquire(relative, await readOwnedState(ctx.cwd, relative));
 					ownership.pending(event.toolCallId, event.toolName, relative);
 				} catch (error) {
 					return { block: true, reason: error instanceof Error ? error.message : String(error) };
@@ -573,9 +626,13 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 		}
 	});
 
-	pi.on("tool_result", async (event: ToolResultEvent) => {
+	pi.on("tool_result", async (event: ToolResultEvent, ctx) => {
 		if (!ownership) return;
-		if (event.toolName === "write" || event.toolName === "edit") ownership.result(event.toolCallId, event.isError);
+		if (event.toolName === "write" || event.toolName === "edit") {
+			const relativePath = ownership.pendingPath(event.toolCallId);
+			const expectedState = !event.isError && relativePath ? await readOwnedState(ctx.cwd, relativePath) : undefined;
+			ownership.result(event.toolCallId, event.isError, expectedState);
+		}
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
@@ -618,7 +675,7 @@ export default function longHorizonExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_before_compact", async (event, ctx) => {
 		const state = await loadState(pi, ctx.cwd);
-		const planSource = await readOptional(state.planPath);
+		const planSource = await readOptional(ctx.cwd, "plan.md");
 		const effectiveMode = run?.mode ?? mode;
 		if (!ctx.model) {
 			ctx.ui.notify("Long Horizon compaction: no active model; using Pi default compaction", "warning");

@@ -83,18 +83,6 @@ export function serializeProgress(state: ProgressState): string {
 	return `${lines.join("\n")}`;
 }
 
-export function incrementAttempt(state: ProgressState, blocker?: string): ProgressState {
-	return {
-		...state,
-		attempts: state.attempts + 1,
-		blocker: blocker ? [blocker] : [...state.blocker],
-		done: [...state.done],
-		tried: [...state.tried],
-		next: [...state.next],
-		unknown: [...state.unknown],
-	};
-}
-
 export function advanceProgress(state: ProgressState, orderedSectionIds: string[], note?: string): ProgressState {
 	const done = [...new Set([...state.done, ...(state.active ? [state.active] : [])])];
 	const nextActive = orderedSectionIds.find((id) => !done.includes(id)) ?? null;

@@ -88,20 +88,13 @@ export async function readGitState(adapter: GitAdapter): Promise<GitState> {
 export function selectCommitPaths(run: RunState, git: GitState, pluginTouchedPaths: string[]): CommitPathSelection {
 	if (!git.available) return { paths: [], error: "Git is unavailable" };
 	if (git.conflictPaths.length > 0) return { paths: [], error: `conflict paths remain: ${git.conflictPaths.join(", ")}` };
-	const preexisting = new Set(run.preexistingDirtyPaths);
-	const touchedCanonicalPath = pluginTouchedPaths.find((filePath) => preexisting.has(filePath));
-	if (touchedCanonicalPath) return { paths: [], error: `pre-existing dirty path was touched: ${touchedCanonicalPath}` };
-	const owned = [...run.ownedPaths].filter((filePath) => !preexisting.has(filePath));
-	const touched = [...pluginTouchedPaths].filter((filePath) => !preexisting.has(filePath));
 	const changedPaths = new Set([...git.dirtyPaths, ...git.stagedPaths]);
 	const paths = [
 		...new Set([
-			...touched.filter((filePath) => changedPaths.has(filePath)),
-			...owned.filter((filePath) => changedPaths.has(filePath)),
+			...pluginTouchedPaths.filter((filePath) => changedPaths.has(filePath)),
+			...[...run.ownedPaths].filter((filePath) => changedPaths.has(filePath)),
 		]),
 	];
-	const boundaryPath = [...run.ownedPaths].find((filePath) => preexisting.has(filePath));
-	if (boundaryPath) return { paths: [], error: `pre-existing dirty path was touched: ${boundaryPath}` };
 	return { paths: paths.sort(), error: undefined };
 }
 

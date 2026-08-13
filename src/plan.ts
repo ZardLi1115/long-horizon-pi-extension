@@ -10,6 +10,53 @@ export class PlanError extends Error {
 const CONFLICT_MARKERS = [/^<<<<<<<(?: .*)?$/m, /^=======$/m, /^>>>>>>>?(?: .*)?$/m];
 const METADATA_PATTERN = /^<!--\s*(id|section-id|needs|verify|brief)\s*:\s*(.*?)\s*-->$/;
 
+export interface PlanFence {
+	marker: "`" | "~";
+	length: number;
+}
+
+interface SourceLine {
+	content: string;
+	ending: string;
+}
+
+function splitSourceLines(source: string): SourceLine[] {
+	const lines: SourceLine[] = [];
+	const linePattern = /([^\r\n]*)(\r\n|\n|\r|$)/g;
+	let match: RegExpExecArray | null;
+	while ((match = linePattern.exec(source)) !== null) {
+		const [raw, content, ending] = match;
+		if (!raw && match.index === source.length) break;
+		lines.push({ content, ending });
+		if (!ending) break;
+	}
+	return lines;
+}
+
+function parseFence(line: string): PlanFence | null {
+	const match = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+	if (!match) return null;
+	return { marker: match[1][0] as "`" | "~", length: match[1].length };
+}
+
+function closesFence(line: string, fence: PlanFence): boolean {
+	const match = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+	return match !== null && match[1][0] === fence.marker && match[1].length >= fence.length;
+}
+
+export function advancePlanFence(
+	line: string,
+	fence: PlanFence | null,
+): { fence: PlanFence | null; fenced: boolean } {
+	if (fence) {
+		return closesFence(line, fence)
+			? { fence: null, fenced: true }
+			: { fence, fenced: true };
+	}
+	const opening = parseFence(line);
+	return opening ? { fence: opening, fenced: true } : { fence: null, fenced: false };
+}
+
 function slugify(title: string): string {
 	const slug = title
 		.toLowerCase()
@@ -19,23 +66,51 @@ function slugify(title: string): string {
 }
 
 export function materializeMissingIds(source: string): { source: string; changed: boolean } {
-	const lines = source.split(/\r?\n/);
-	const result: string[] = [];
+	const lines = splitSourceLines(source);
+	const defaultLineEnding = lines.find((line) => line.ending)?.ending ?? "\n";
+	let result = "";
 	let changed = false;
+	let fence: PlanFence | null = null;
 	for (let index = 0; index < lines.length; index += 1) {
 		const line = lines[index];
-		result.push(line);
-		const sectionMatch = /^### (.+?)\s*$/.exec(line);
-		if (!sectionMatch) continue;
-		let lookahead = index + 1;
-		while (lookahead < lines.length && !lines[lookahead].trim()) lookahead += 1;
-		const nextLine = lines[lookahead]?.trim() ?? "";
-		if (/^<!--\s*(?:id|section-id)\s*:/.test(nextLine)) continue;
-		const title = sectionMatch[1].replace(/^\d+(?:\.\d+)*\s+/, "").trim() || sectionMatch[1];
-		result.push(`<!-- id: ${slugify(title)} -->`);
-		changed = true;
+		const fenceState = advancePlanFence(line.content, fence);
+		fence = fenceState.fence;
+		if (fenceState.fenced) {
+			result += line.content + line.ending;
+			continue;
+		}
+
+		let insertId: string | undefined;
+		const sectionMatch = /^### (.+?)\s*$/.exec(line.content);
+		if (sectionMatch) {
+			let lookahead = index + 1;
+			let hasId = false;
+			while (lookahead < lines.length) {
+				const nextLine = lines[lookahead].content;
+				if (!nextLine.trim()) {
+					lookahead += 1;
+					continue;
+				}
+				const metadata = METADATA_PATTERN.exec(nextLine.trim());
+				if (!metadata) break;
+				if (metadata[1] === "id" || metadata[1] === "section-id") hasId = true;
+				lookahead += 1;
+			}
+			if (!hasId) {
+				const title = sectionMatch[1].replace(/^\d+(?:\.\d+)*\s+/, "").trim() || sectionMatch[1];
+				insertId = `<!-- id: ${slugify(title)} -->`;
+				changed = true;
+			}
+		}
+
+		const lineEnding = line.ending || defaultLineEnding;
+		if (insertId) {
+			result += line.content + lineEnding + insertId + (line.ending ? lineEnding : "");
+		} else {
+			result += line.content + line.ending;
+		}
 	}
-	return { source: result.join("\n"), changed };
+	return { source: result, changed };
 }
 
 function parseNeeds(value: string): string[] {
@@ -46,19 +121,13 @@ function parseNeeds(value: string): string[] {
 }
 
 export function parsePlan(source: string): PlanDocument {
-	const lines = source.split(/\r?\n/);
-	const conflictLines = lines
-		.map((line, index) => ({ line, index: index + 1 }))
-		.filter(({ line }) => CONFLICT_MARKERS.some((marker) => marker.test(line)))
-		.map(({ index }) => index);
-	if (conflictLines.length > 0) {
-		throw new PlanError(`plan.md contains git conflict markers at lines ${conflictLines.join(", ")}`);
-	}
-
+	const lines = source.split(/\r\n|\n|\r/);
+	const conflictLines: number[] = [];
 	const sections: PlanSection[] = [];
 	const chapters: string[] = [];
 	let currentChapter: string | undefined;
 	let current: (Omit<PlanSection, "id" | "endLine" | "generatedId"> & { explicitId?: string; generatedId?: boolean }) | null = null;
+	let fence: PlanFence | null = null;
 
 	const finish = (endLine: number) => {
 		if (!current) return;
@@ -79,6 +148,10 @@ export function parsePlan(source: string): PlanDocument {
 
 	for (let index = 0; index < lines.length; index += 1) {
 		const line = lines[index];
+		const fenceState = advancePlanFence(line, fence);
+		fence = fenceState.fence;
+		if (fenceState.fenced) continue;
+		if (CONFLICT_MARKERS.some((marker) => marker.test(line))) conflictLines.push(index + 1);
 		const chapterMatch = /^(##) (?!#)(.+?)\s*$/.exec(line);
 		if (chapterMatch) {
 			finish(index);
@@ -111,7 +184,10 @@ export function parsePlan(source: string): PlanDocument {
 		if (key === "verify") current.verify = rawValue || undefined;
 		if (key === "brief") current.brief = rawValue || undefined;
 	}
-	finish(lines.length);
+		finish(lines.length);
+	if (conflictLines.length > 0) {
+		throw new PlanError(`plan.md contains git conflict markers at lines ${conflictLines.join(", ")}`);
+	}
 
 	const byId = new Map<string, PlanSection>();
 	const duplicateIds = new Set<string>();

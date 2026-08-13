@@ -66,7 +66,6 @@ interface RunState {
   startedAt: string;
   sectionId: string;
   baseHead: string | null;
-  preexistingDirtyPaths: string[];
   pendingPaths: Map<string, string>;
   ownedPaths: Set<string>;
   unownedPaths: Set<string>;
@@ -130,7 +129,7 @@ pi.appendEntry("long-horizon/mode", { mode: "single" | "multi" });
 
 动态块作为隐藏 custom message 返回，不永久追加到 session history。稳定协议通过 `before_agent_start` 的 system prompt 追加一次性规则：plan 是 roadmap，progress 是 pointer，Git 是代码历史，完成必须调用 section 工具。
 
-每次 Run 开始时 harness 更新 attempts：active 未变化则递增，active 变化则重置为 1；切换 active 时清空 section 局部 `tried`，blocker 由完成或验证失败流程覆盖。
+每次 Run 开始时 harness 不修改 attempts。只有模型在真实尝试失败或放弃具体方案后调用 `record_attempt_failure`，才递增 attempts 并写入 tried、blocker、next；切换 active 时由 `advanceProgress` 将 attempts 重置为 0。
 
 ## 5. Progress 文件
 
@@ -167,6 +166,7 @@ next:
 {
   id: string,
   verify?: string,
+  skipVerify?: boolean,
   note?: string
 }
 ```
@@ -174,21 +174,25 @@ next:
 执行规则：
 
 1. `id` 必须等于当前 Run 锁定的 section；single 不允许跨 section 完成。
-2. 如果提供 `verify`，在当前 cwd 执行 shell 命令；exit code 为 0 才通过。未提供则标记为 `unverified`，不强制执行 plan 元数据中的命令。
-3. 验证失败：active 保持不变，attempts 增加，输出尾部截断后写入 blocker；不更新 done，不提交，不结束 Run。
+2. `section.verify` 默认生效；工具参数 `verify` 可以覆盖它。只有显式传入 `skipVerify: true` 才跳过验证；`verify` 与 `skipVerify` 同时传入时拒绝。
+3. 验证失败：active 保持不变，attempts 不自动增加，输出尾部返回给模型；模型确认这是一次真实失败后调用 `record_attempt_failure`，再写入 attempts、tried、blocker、next。不更新 done，不提交，不结束 Run。
 4. 验证通过：将 id 放入 done，active 推进到下一个未完成 section，重置 attempts，清空 blocker，并写回 progress.md。
-5. 将 progress.md、插件本 Run 明确 owned 的文件加入一次 Git commit；commit message 包含 section ID。
+5. 验证完成后核对 owned 文件的内容快照；如果它们被验证命令或外部进程修改则拒绝完成。将 progress.md、插件本 Run 明确 owned 的文件加入一次 Git commit；commit message 包含 section ID。
 6. single 模式下记录完成结果并延迟 `ctx.abort()`，确保 tool result 有机会进入 Pi session；multi 模式继续下一次 LLM 调用。
 
 工具使用 `executionMode: "sequential"`，防止同一 assistant 消息并行执行多个 section 状态变更。
 
-### 6.2 reopen_section
+### 6.2 record_attempt_failure
+
+参数：`{ id, tried, blocker, next }`。`id` 必须等于当前 active section。工具只在模型明确记录一次具体失败或放弃方案时递增 `attempts`，追加 `tried`，并更新 `blocker`、`next`；普通 agent turn 和 `complete_section` 的 verify failure 都不会自动写入这些字段。
+
+### 6.3 reopen_section
 
 参数：`{ id: string, reason?: string }`。
 
 将已完成 ID 从 done 移回 active，清空该 section 的完成状态并写入 blocker/next 提示。它不自动回滚 Git，也不删除历史 commit；代码回滚通过 Git 工具完成。`reopen_section` 只允许在当前 Run 空闲或明确指向已有 done section 时执行，避免并行状态竞态。
 
-### 6.3 delete / move
+### 6.4 delete / move
 
 Pi 没有内置 delete/move，因此注册两个 Extension tool：
 
@@ -199,21 +203,23 @@ Pi 没有内置 delete/move，因此注册两个 Extension tool：
 
 ## 7. Git ownership 与提交
 
-Run 开始时记录 `baseHead`、预先 dirty/staged paths。write/edit 在 `tool_call` 阶段记录 pending path，在成功 `tool_result` 后加入 owned paths；delete/move 由工具执行成功后加入。
+Run 开始时只记录 `baseHead`。write/edit 在 `tool_call` 阶段记录 pending path，在成功 `tool_result` 后加入 owned paths；delete/move 由工具执行成功后加入。
+
+每个成功 ownership 操作同时记录路径的内容快照（删除为 `null`，移动记录源和目标）。完成 section 前重新读取并比较快照；验证命令、bash、formatter 或外部程序修改 owned 文件时，整个完成事务失败。当前版本不维护 `preexistingDirtyPaths`：自动提交只选择本 Run owned paths 与 runtime touched paths 中当前确实 changed 的文件，因此允许用户与 agent 对同一路径的修改一起进入提交。
 
 Git 提交只使用：
 
-- 本 Run 成功 write/edit/delete/move 触碰的、启动时未脏的路径；
+- 本 Run 成功 write/edit/delete/move 触碰的路径；
 - 插件本次更新的 `plan.md`、`progress.md`。
 
-bash 造成的文件变化保留为 unowned dirty change，不自动加入提交。预先 dirty/staged 的路径不纳入自动提交；如果 agent 同时触碰这些路径，`complete_section` 报告边界不明确并拒绝声称已完成，除非这些路径被明确清理或后续实现增加人工 ownership 确认。
+bash 造成的文件变化保留为 unowned dirty change，不自动加入提交。section 边界留下的 dirty/staged 路径会在下一 section 中继续显示为 unowned，直到被该 section 明确拥有。用户与 agent 同时修改同一路径时，当前版本接受整个文件一起进入自动提交；hunk-level ownership 留待后续版本。
 
 提交前检查：
 
 - 当前 cwd 是 Git 仓库；
 - 没有 conflict marker；
 - owned 路径仍存在预期差异；
-- 没有把预先 staged/dirty 或 unowned 路径加入 commit。
+- 没有把 unowned 路径加入 commit；owned/runtime-touched 路径即使在 Run 开始前已经 dirty，也按当前版本的明确取舍允许提交。
 
 没有可提交代码时，工具返回明确的 `no changes to commit`，但 progress 的语义更新仍然保留并报告。
 
@@ -262,7 +268,7 @@ plan_source: plan.md
 - needs/verify/brief 元数据解析。
 - progress 有界字段读写、active 推进、attempts、done/reopen。
 - plan working set 和 context block 稳定输出。
-- Git status 中 pre-existing、owned、unowned 路径分类。
+- Git status 中 owned、unowned 路径分类；不再维护 pre-existing baseline。
 - verify 通过/失败和命令输出截断。
 
 ### Pi 集成烟测

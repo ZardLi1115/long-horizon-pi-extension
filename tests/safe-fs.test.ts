@@ -14,6 +14,19 @@ describe("safe filesystem operations", () => {
 		await expect(safeAccessFile(cwd, "nested/file.txt")).resolves.toBeUndefined();
 	});
 
+	it("does not require python3 to perform safe filesystem operations", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "long-horizon-safe-fs-node-"));
+		const previousPath = process.env.PATH;
+		process.env.PATH = "";
+		try {
+			await safeWriteFile(cwd, "native.txt", "node");
+			await expect(safeReadFile(cwd, "native.txt")).resolves.toEqual(Buffer.from("node"));
+		} finally {
+			if (previousPath === undefined) delete process.env.PATH;
+			else process.env.PATH = previousPath;
+		}
+	});
+
 	it("treats creating the cwd itself as an already-satisfied mkdir", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "long-horizon-safe-root-"));
 
@@ -30,6 +43,18 @@ describe("safe filesystem operations", () => {
 
 		await expect(safeWriteFile(cwd, "linked/new.txt", "escape")).rejects.toThrow();
 		await expect(safeReadFile(cwd, "linked/secret.txt")).rejects.toThrow();
+		await expect(fs.readFile(path.join(outside, "secret.txt"), "utf8")).resolves.toBe("secret");
+	});
+
+	it("rejects a symlink at the final file component", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "long-horizon-safe-leaf-"));
+		const outside = await fs.mkdtemp(path.join(os.tmpdir(), "long-horizon-safe-leaf-outside-"));
+		await fs.writeFile(path.join(outside, "secret.txt"), "secret");
+		await fs.symlink(path.join(outside, "secret.txt"), path.join(cwd, "linked.txt"));
+
+		await expect(safeReadFile(cwd, "linked.txt")).rejects.toThrow();
+		await expect(safeWriteFile(cwd, "linked.txt", "escape")).rejects.toThrow();
+		await expect(safeDeleteFile(cwd, "linked.txt")).rejects.toThrow();
 		await expect(fs.readFile(path.join(outside, "secret.txt"), "utf8")).resolves.toBe("secret");
 	});
 

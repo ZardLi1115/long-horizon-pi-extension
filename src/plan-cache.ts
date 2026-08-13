@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { parsePlan } from "./plan.js";
+import { advancePlanFence, parsePlan, type PlanFence } from "./plan.js";
 import type {
 	PlanCacheDelta,
 	PlanCacheDocument,
@@ -37,9 +37,16 @@ function splitSourceLines(source: string): SourceLine[] {
 export function parsePlanCacheDocument(source: string): PlanCacheDocument {
 	const plan = parsePlan(source);
 	const lines = splitSourceLines(source);
-	const boundaries = lines
-		.map((line, index) => ({ line, index }))
-		.filter(({ line }) => /^### (.+?)\s*$/.test(line.content) || /^## (?!#)(.+?)\s*$/.test(line.content));
+	const boundaries: Array<{ line: SourceLine; index: number }> = [];
+	let fence: PlanFence | null = null;
+	for (const [index, line] of lines.entries()) {
+		const fenceState = advancePlanFence(line.content, fence);
+		fence = fenceState.fence;
+		if (fenceState.fenced) continue;
+		if (/^### (.+?)\s*$/.test(line.content) || /^## (?!#)(.+?)\s*$/.test(line.content)) {
+			boundaries.push({ line, index });
+		}
+	}
 	const sectionStarts = boundaries.filter(({ line }) => /^### (.+?)\s*$/.test(line.content));
 	const sections = new Map<string, PlanCacheSection>();
 	const structureParts: string[] = [];

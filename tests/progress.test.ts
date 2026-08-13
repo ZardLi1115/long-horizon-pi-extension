@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
 	advanceProgress,
-	incrementAttempt,
 	parseProgress,
 	reopenProgress,
 	serializeProgress,
@@ -80,14 +79,17 @@ describe("progress state", () => {
 		});
 	});
 
-	it("increments attempts immutably and reopens a completed section", () => {
+	it("reopens a completed section and resets its local state", () => {
 		const original = parseProgress("active: current\nattempts: 1\ndone:\n  - old");
-		const attempted = incrementAttempt(original, "verify failed");
 		const reopened = reopenProgress(original, "old", "regression found");
 
-		expect(attempted).toMatchObject({ active: "current", attempts: 2, blocker: ["verify failed"] });
 		expect(reopened).toMatchObject({ active: "old", attempts: 0, done: [], blocker: ["regression found"] });
 		expect(original).toMatchObject({ active: "current", attempts: 1, done: ["old"] });
+	});
+
+	it("does not expose a generic attempt incrementer", async () => {
+		const progressModule = await import("../src/progress.js");
+		expect("incrementAttempt" in progressModule).toBe(false);
 	});
 
 	it("preserves unknown fields while advancing progress", () => {
