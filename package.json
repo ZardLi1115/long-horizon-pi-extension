@@ -1,0 +1,19 @@
+{
+	"name": "long-horizon-pi-extension",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@mariozechner/pi-coding-agent": "file:/opt/homebrew/lib/node_modules/@mariozechner/pi-coding-agent",
+		"typebox": "file:/opt/homebrew/lib/node_modules/@mariozechner/pi-coding-agent/node_modules/typebox"
+	},
+	"devDependencies": {
+		"@types/node": "^24.3.0",
+		"typescript": "^5.7.3",
+		"vitest": "^3.2.4"
+	}
+}

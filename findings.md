@@ -22,10 +22,16 @@
 - single 完成后不发送 follow-up；multi 依赖下一次自然 LLM 调用读取更新后的 context。
 - compaction 不复制完整 plan/progress/git 历史，只保存继续推理所需的 working memory。
 
+## 实现与验证
+
+- Pi 0.73.1 的 custom tool `terminate: true` 是跳过自动 follow-up LLM call 的标准机制；single completion 同时延迟调用 `ctx.abort()`，确保工具结果先返回。
+- `OwnershipTracker` 在成功 write/edit/delete/move 后会清除同一路径的 unowned 标记。
+- 每次 `before_agent_start` 创建新的 Run；同一 Run 内的 multi section history 保留在内存中，跨 query 不继承 completed section history。
+- 最终验证：46 个 Vitest 测试通过，TypeScript 类型检查通过，Pi `--help` 加载通过，RPC 命令注册/切换/status 烟测通过。
+
 ## 需要在实现时验证的 API 细节
 
 - `tool_result` 的输入路径字段与内置 write/edit 结果判定。
 - `ctx.abort()` 延迟到自定义工具返回后，确保工具结果能写入 session。
 - `pi.exec("git", ...)` 的返回码和超时行为。
 - Pi 在 print/json 模式下的 UI 通知行为。
-
