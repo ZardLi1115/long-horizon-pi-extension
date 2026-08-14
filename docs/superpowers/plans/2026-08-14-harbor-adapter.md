@@ -417,7 +417,7 @@ async def stage_local_extension(
 
 Run the same unittest command.
 
-Expected: all eight staging tests pass.
+Expected: all six staging tests pass.
 
 - [ ] **Step 5: Commit task validation and staging**
 

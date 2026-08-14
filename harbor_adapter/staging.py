@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import shlex
+from typing import Any
 from pathlib import Path
 
 REQUIRED_TASK_ARTIFACTS = ("plan.md", "progress.md")
+STAGED_ROOT = Path("/tmp/long-horizon-pi-extension")
 
 
 def repository_root() -> Path:
@@ -32,3 +35,42 @@ def local_runtime_files(root: Path) -> list[tuple[Path, Path]]:
             files.append((source, source.relative_to(root)))
 
     return files
+
+
+async def require_task_artifacts(environment: Any) -> None:
+    for relative_path in REQUIRED_TASK_ARTIFACTS:
+        result = await environment.exec(
+            command=f"test -f {shlex.quote(relative_path)}"
+        )
+        if result.return_code != 0:
+            raise RuntimeError(
+                f"Harbor task environment is missing {relative_path}; "
+                "provide it in the task environment before running Long Horizon"
+            )
+
+
+async def stage_local_extension(
+    agent: Any,
+    environment: Any,
+    root: Path | None = None,
+) -> Path:
+    source_root = root or repository_root()
+    files = local_runtime_files(source_root)
+    destination_root = STAGED_ROOT.as_posix()
+
+    await agent.exec_as_agent(
+        environment,
+        command=f"mkdir -p {shlex.quote(destination_root)}",
+    )
+    for source, relative_path in files:
+        destination = STAGED_ROOT / relative_path
+        await agent.exec_as_agent(
+            environment,
+            command=f"mkdir -p {shlex.quote(destination.parent.as_posix())}",
+        )
+        await agent._upload_agent_owned_file(
+            environment,
+            source,
+            destination.as_posix(),
+        )
+    return STAGED_ROOT / "index.ts"
