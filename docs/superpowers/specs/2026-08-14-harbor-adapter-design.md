@@ -7,16 +7,16 @@
 
 本适配层是一个独立的 Harbor 自定义 Agent，位于 Long Horizon Pi Extension 仓库内。它复用 Harbor 已有的 Pi agent 安装、模型连接、日志、超时、token/cost 统计和 verifier 流程，只改变 Pi 的启动命令，使 Pi 显式加载当前本地 checkout 中的 `index.ts`。
 
-第一版只支持专门的 long-horizon task。每个 task 必须自行提供：
+第一版只支持专门的 long-horizon task。运行时必须是一个有效的 Harbor task，但它可以来自任务作者、`harbor tasks init` 生成的模板、已发布 task package 或 benchmark adapter。适配层不要求用户手工逐项创建 Harbor 标准文件。
 
 ```text
-plan.md
-progress.md
 task.toml
 instruction.md
 environment/
 tests/
 ```
+
+Long Horizon 额外要求 `plan.md` 和 `progress.md` 已经被任务环境放入 Pi 的工作目录。它们可以由任务作者或 benchmark-to-Harbor 转换器准备；Harbor 和本适配层都不会凭空生成任务计划内容。
 
 适配层不生成、改写或上传 `plan.md` / `progress.md`，也不实现原生 Pi 对照实验。用户后续可以直接使用 Harbor 的原生 `pi` agent 作为未启用插件的运行方式。
 
@@ -50,7 +50,7 @@ harbor run
 
 适配层只增加两件事：
 
-1. 在 setup 阶段确认 task 的 `plan.md` 和 `progress.md` 存在，并将本地插件运行所需文件上传到 sandbox；
+1. 在 setup 阶段确认 task 环境中的 `plan.md` 和 `progress.md` 存在，并将本地插件运行所需文件上传到 sandbox；
 2. 在 Pi 命令中增加 `--no-extensions --extension <staged>/index.ts`。
 
 ```text
@@ -85,7 +85,7 @@ harbor_adapter/
 定义 `LongHorizonPi`：
 
 - 继承 Harbor 的 `Pi` agent，复用 Pi 安装和 `populate_context_post_run()`；
-- `setup()` 先执行父类 setup，再校验 task artifacts 和 staging 本地插件；
+- `setup()` 先校验 task 环境中的 Long Horizon artifacts，再执行父类 setup 和本地插件 staging；
 - `run()` 复制 Harbor Pi agent 当前的模型/env/session/log 参数拼装逻辑，只插入 `--no-extensions` 与 `--extension`；
 - 继续使用 `/logs/agent/pi/pi.txt`，不改变 Harbor 对 JSON 输出和 usage 的解析；
 - `name()` 返回独立名称，例如 `long-horizon-pi`，避免和 Harbor 原生 `pi` 名称混淆；
@@ -127,7 +127,8 @@ harbor_adapter/
 
 - 本地 checkout 约定；
 - Harbor import path 的运行命令；
-- task 目录最低要求；
+- Harbor task 文件由任务作者或 benchmark adapter 提供，Long Horizon 只额外要求运行环境中存在 `plan.md` / `progress.md`；
+- `harbor tasks init` 只能生成 Harbor task 骨架，不能生成有语义的计划或 verifier；
 - 如何使用原生 `pi` agent 做未启用插件的运行；
 - Harbor 未安装在当前开发机时，如何在装有 Harbor 的环境中执行 smoke test；
 - 明确适配层不会联网拉取插件。
@@ -143,7 +144,7 @@ setup 阶段失败必须给出可定位错误：
 - 本地 checkout 缺少 `index.ts` 或 `src/`：提示应从完整 Long Horizon 仓库根目录运行；
 - 任一允许上传文件失败：保留 Harbor 原始错误并指明文件路径。
 
-校验只读 task 文件，不会自动补文件或改写内容。Long Horizon 自身在 Pi 运行时对缺少 section ID 的既有行为保持不变。
+校验只读 task 环境，不会自动补文件或改写内容。Long Horizon 自身在 Pi 运行时对缺少 section ID 的既有行为保持不变。
 
 ### 4.2 Pi 命令
 
@@ -168,7 +169,7 @@ setup 阶段失败必须给出可定位错误：
 
 - 本地插件路径由 adapter 文件位置确定，不接受 task instruction 里的路径，避免模型控制加载任意宿主文件。
 - staging 使用固定 allowlist，不上传 `node_modules`、`.git`、隐藏文件或规划记录。
-- task 的 `plan.md` / `progress.md` 只做存在性检查；schema、Git、verify 和 ownership 由 Long Horizon runtime 负责。
+- task 环境的 `plan.md` / `progress.md` 只做存在性检查；schema、Git、verify 和 ownership 由 Long Horizon runtime 负责。
 - adapter setup 失败时不启动 Pi，避免得到一个实际上未加载插件的假阳性 trial。
 - `--no-extensions` 确保未意外加载其他 Pi 用户扩展；目标插件通过绝对路径显式加载。
 - 本适配层不执行网络命令。另一台电脑运行时必须提前将本仓库下载到本地，并从该 checkout 导入 `harbor_adapter.agent:LongHorizonPi`。
@@ -200,7 +201,7 @@ setup 阶段失败必须给出可定位错误：
 ## 7. 成功标准
 
 - 从 Long Horizon checkout 根目录可通过 Harbor import path 加载 `LongHorizonPi`；
-- task 缺少 `plan.md` 或 `progress.md` 时在 Pi 启动前明确失败；
+- task 环境缺少 `plan.md` 或 `progress.md` 时在 Pi 启动前明确失败；
 - Pi 只加载本地 staging 的 Long Horizon extension，不访问远程源；
 - Harbor 原生日志、verifier、reward、token 和 cost 流程不被破坏；
 - 用户可以用 Harbor 内置 `pi` agent 运行同一 task，adapter 不强制参与对照实验；
