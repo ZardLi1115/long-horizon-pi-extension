@@ -29,6 +29,7 @@ Create empty `harbor_adapter/__init__.py` and `harbor_adapter/tests/__init__.py`
 Create `harbor_adapter/tests/test_command.py`:
 
 ```python
+import shlex
 import unittest
 
 from harbor_adapter.command import build_pi_command
@@ -69,7 +70,7 @@ class BuildPiCommandTests(unittest.TestCase):
 
         self.assertIn("--continue", command)
         self.assertIn("--provider 'open ai'", command)
-        self.assertIn("--model 'model'\\''s id'", command)
+        self.assertIn("--model " + shlex.quote("model's id"), command)
         self.assertIn("'fix; echo SHOULD_NOT_RUN'", command)
         self.assertIn("--thinking high", command)
 ```
