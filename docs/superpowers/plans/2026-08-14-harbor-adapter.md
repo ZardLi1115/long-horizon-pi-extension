@@ -548,8 +548,6 @@ Create `harbor_adapter/agent.py`:
 ```python
 from __future__ import annotations
 
-from typing import override
-
 from harbor.agents.installed.base import with_prompt_template
 from harbor.agents.installed.pi import Pi
 from harbor.environments.base import BaseEnvironment
@@ -569,11 +567,9 @@ class LongHorizonPi(Pi):
     _long_horizon_extension: str | None = None
 
     @staticmethod
-    @override
     def name() -> str:
         return "long-horizon-pi"
 
-    @override
     async def setup(self, environment: BaseEnvironment) -> None:
         await require_task_artifacts(environment)
         await super().setup(environment)
@@ -584,7 +580,6 @@ class LongHorizonPi(Pi):
         )
         self._long_horizon_extension = extension_path.as_posix()
 
-    @override
     @with_prompt_template
     async def run(
         self,
