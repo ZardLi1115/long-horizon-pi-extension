@@ -135,6 +135,18 @@ npm test
 npm run typecheck
 ```
 
+## Harbor evaluation
+
+The repository includes a local-only Harbor Agent adapter in
+[`harbor_adapter/README.md`](harbor_adapter/README.md). It runs Harbor's Pi
+agent with the local Long Horizon extension loaded explicitly. Harbor task
+metadata and verifier files may come from `harbor tasks init`, a published task,
+or a benchmark adapter; the task environment must additionally contain
+`plan.md` and `progress.md`.
+
+The adapter never downloads the plugin. Run Harbor from this checkout so
+`harbor_adapter.agent:LongHorizonPi` is importable.
+
 ## Architecture
 
 ```text
