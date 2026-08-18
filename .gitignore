@@ -4,3 +4,8 @@ coverage/
 .DS_Store
 __pycache__/
 *.py[cod]
+
+# Local implementation-process records; runtime state belongs in the target project.
+/task_plan.md
+/findings.md
+/progress.md

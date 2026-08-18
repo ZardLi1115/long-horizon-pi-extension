@@ -141,16 +141,18 @@ When a run is incomplete, the extension reports the active section, owned and un
 ## Architecture
 
 ```text
-src/       Host-agnostic workflow core
-index.ts   Pi Extension API adapter
-tests/     Core and Pi wiring tests
+assets/          README visual assets
+src/             Host-agnostic workflow core
+tests/           Core and Pi wiring tests
+index.ts         Pi Extension API adapter
+harbor_adapter/  Optional local Harbor adapter, guide, and Python tests
 ```
 
 The Pi adapter supplies the host integration. Planning, progress tracking, run ownership, Git transactions, filesystem operations, and plan caching are implemented in `src/` so another host adapter can reuse the workflow core.
 
-## Harbor Adapter
+## Optional Harbor Adapter
 
-The repository also contains a local Harbor custom-agent adapter that starts Harbor's Pi agent with this extension loaded from the checkout. See [the Harbor adapter guide](./harbor_adapter/README.md) for its runtime requirements and commands.
+A supported optional local Harbor custom-agent adapter starts Harbor's Pi agent with this extension loaded from the checkout. See [the Harbor adapter guide](./harbor_adapter/README.md) for its runtime requirements and commands.
 
 ## Development
 

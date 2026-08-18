@@ -141,16 +141,18 @@ Long Horizon 将三级 Markdown 标题（`###`）识别为计划章节。建议�
 ## 架构
 
 ```text
-src/       宿主无关的工作流核心
-index.ts   Pi Extension API 适配器
-tests/     核心逻辑与 Pi 接线测试
+assets/          README 项目视觉资源
+src/             宿主无关的工作流核心
+tests/           核心逻辑与 Pi 接线测试
+index.ts         Pi Extension API 适配器
+harbor_adapter/  可选的本地 Harbor 适配器、指南与 Python 测试
 ```
 
 Pi 适配器负责宿主集成。计划解析、进度追踪、运行所有权、Git 事务、文件系统操作与计划缓存都位于 `src/`，因此其他宿主适配器可以复用这套工作流核心。
 
-## Harbor 适配器
+## 可选 Harbor 适配器
 
-仓库还提供了一个本地 Harbor 自定义智能体适配器，可在 Harbor 的 Pi 智能体中从本地检出目录加载本扩展。其运行要求和命令请参阅 [Harbor 适配器指南](./harbor_adapter/README.md)。
+仓库提供一个受支持的可选本地 Harbor 自定义智能体适配器，可在 Harbor 的 Pi 智能体中从本地检出目录加载本扩展。其运行要求和命令请参阅 [Harbor 适配器指南](./harbor_adapter/README.md)。
 
 ## 开发
 
