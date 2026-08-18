@@ -164,3 +164,7 @@ npm run typecheck
 ## 许可证
 
 本项目采用 [MIT License](./LICENSE)。
+
+## 致谢
+
+感谢 [Linux.do](https://linux.do) 社区。

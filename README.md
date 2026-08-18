@@ -164,3 +164,7 @@ npm run typecheck
 ## License
 
 This project is licensed under the [MIT License](./LICENSE).
+
+## Acknowledgments
+
+Thanks to the [Linux.do](https://linux.do) community.
